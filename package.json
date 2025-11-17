@@ -18,5 +18,10 @@
         "prettier": "^3.6.2",
         "webpack": "^5.102.1",
         "webpack-cli": "^6.0.1"
+    },
+    "dependencies": {
+        "express": "^5.1.0",
+        "googleapis": "^165.0.0",
+        "multer": "^2.0.2"
     }
 }
