@@ -1,0 +1,169 @@
+body {
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+        sans-serif;
+    margin: 0;
+    padding: 0;
+    background-color: #FF4B14;
+    color: #111827;
+}
+
+.container {
+    max-width: 70%;
+    margin: 0 auto;
+    padding: 24px 16px 40px;
+    background-color: #d1d5db;
+    border: 3px solid black;
+    box-sizing: border-box;
+}
+
+/* タブのデザインの設定 */
+.book-tabs {
+    display: flex;
+    gap: 0;
+    margin-left: calc((100% - 70%) / 2);
+    width: fit-content;
+    background-color: #d1d5db;
+    border: 3px solid black;
+    border-bottom: none;
+    box-sizing: border-box;
+    border-radius: 10px 10px 0 0;
+}
+
+.book-tabs .tab {
+    display: inline-block;
+    background-color: #d1d5db;
+    color: #111827;
+    text-decoration: none;
+    padding: 12px 24px;
+    font-size: 0.9rem;
+    font-weight: 600;
+    cursor: pointer;
+    border: none;
+    border-right: 3px solid #111827;
+    transition: background-color 0.2s ease;
+}
+
+.home-tab {
+    border-radius: 10px 0 0 0;
+}
+
+.book-tabs .user-tab {
+    border-radius: 0 10px 0 0;
+    border-right: none !important;
+}
+
+.book-tabs .tab:hover {
+    background-color: #b8bcc4;
+}
+
+
+/* タブ選択時の下線を消す */
+.book-tabs .tab.active {
+    background-color: #d1d5db;
+    position: relative;
+    z-index: 1;
+}
+
+.book-tabs .tab.active::after {
+    content: '';
+    position: absolute;
+    bottom: -3px;
+    left: 0;
+    right: 0;
+    height: 3px;
+    background-color: #d1d5db;
+}
+
+
+
+
+
+
+
+.main-content h2 {
+    margin-top: 0;
+    margin-bottom: 16px;
+}
+
+.search-form {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 24px;
+}
+
+.search-form input[type="text"] {
+    flex: 1;
+    padding: 8px 10px;
+    border-radius: 6px;
+    border: 1px solid #d1d5db;
+    background-color: #ffffff;
+    color: #111827;
+}
+
+.search-form input[type="submit"] {
+    padding: 8px 14px;
+    border-radius: 6px;
+    border: none;
+    cursor: pointer;
+    background: #f97316;
+    color: #111827;
+    font-weight: 600;
+}
+
+.movie-list {
+    margin-top: 24px;
+}
+
+.movie-list h3 {
+    margin: 0 0 12px;
+}
+
+/* 検索結果を一列に複数作品表示 */
+.movie-list:not(.recommendations) .movie-row {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    width: auto;
+
+}
+
+.movie-list:not(.recommendations) .movie-item {
+    flex: 0 0 calc(20% - 10px);
+    text-align: center;
+    background-color: #ffffff;
+    border-radius: 10px;
+    padding: 10px;
+    border: 1px solid #e5e7eb;
+    min-width: 120px;
+    margin-bottom: 16px;
+}
+
+/* インド映画おすすめを3つだけ横並びに表示 */
+.movie-list.recommendations .movie-row {
+    display: flex;
+    gap: 16px;
+}
+
+.movie-list.recommendations .movie-item {
+    flex: 1;
+    text-align: center;
+    background-color: #ffffff;
+    border-radius: 10px;
+    padding: 10px;
+    border: 1px solid #e5e7eb;
+}
+
+.movie-item img {
+    width: 100%;
+    height: auto;
+    border-radius: 8px;
+    object-fit: cover;
+    display: block;
+    margin-bottom: 8px;
+}
+
+.movie-item p {
+    margin: 0;
+    font-size: 0.9rem;
+}
+

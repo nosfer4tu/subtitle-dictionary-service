@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="ja">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>Moviary - User</title>
+        <link
+            rel="stylesheet"
+            href="{{ url_for('static', filename='style.css') }}"
+        />
+    </head>
+    <body>
+        <header class="book-tabs">
+            <a class="tab home-tab" href="{{ url_for('index') }}">HOME</a>
+            <a class="tab dictionary-tab" href="{{ url_for('dictionary') }}">DICTIONARY</a>
+            <a class="tab user-tab active" href="{{ url_for('user') }}">USER</a>
+        </header>
+        <div class="container">
+            <div class="main-content">
+                <h2>ユーザーページ</h2>
+                <p>こちらはユーザーページのプレースホルダーです。</p>
+            </div>
+        </div>
+    </body>
+</html>
+
