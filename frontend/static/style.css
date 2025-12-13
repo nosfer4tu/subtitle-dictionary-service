@@ -7,6 +7,14 @@ body {
     color: #111827;
 }
 
+h1 {
+    font-size: 50px;
+    color: white;
+    max-width: 70%;
+    margin: 0 auto;
+}
+
+
 .container {
     max-width: 70%;
     margin: 0 auto;
