@@ -18,7 +18,11 @@ load_dotenv(dotenv_path=env_path)
 # Also try loading from current directory as fallback
 load_dotenv()
 
-app = Flask(__name__, template_folder='../frontend')
+app = Flask(
+    __name__,
+    template_folder="../frontend",
+    static_folder="../frontend/static",
+)
 app.secret_key = os.environ.get("SECRET_KEY")
 
 TMDB_API_KEY = os.environ.get("TMDB_API_KEY")
@@ -202,10 +206,25 @@ def index():
     #     return redirect(url_for("login"))
     
     
-        query = request.args.get("query")
-        movies = search_movies(query) if query else []
-        indian_movies = fetch_indian_movies()
-        return render_template("index.html", movies=movies, query=query or "", indian_movies=indian_movies)
+    query = request.args.get("query")
+    movies = search_movies(query) if query else []
+    indian_movies = fetch_indian_movies()
+    return render_template(
+        "index.html",
+        movies=movies,
+        query=query or "",
+        indian_movies=indian_movies,
+    )
+
+
+@app.route("/dictionary")
+def dictionary():
+    return render_template("dictionary.html")
+
+
+@app.route("/user")
+def user():
+    return render_template("user.html")
 
 # @app.route('/movie/<int:movie_id>/review', methods=['POST'])
 # def add_review(movie_id):
@@ -224,4 +243,7 @@ def index():
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=8000)
+
+
+
 
