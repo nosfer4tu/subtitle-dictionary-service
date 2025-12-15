@@ -54,17 +54,9 @@ def extract_json_from_text(text: str) -> str:
     return text[first_brace:]
 
 def detect_terms(text: str, source_language: str = 'hi') -> dict:
-    """ 
-    Sends text to ChatGPT and extracts:
-    - cultural terms / unique Indian words
-    - meaning in Japanese
-    
-    Args:
-        text: Source text in Indian language
-        source_language: Language code (hi, kn, ta)
-    
-    Returns:
-        Dictionary with 'terms' list, or empty dict if detection fails
+    """
+    Detect cultural terms in text.
+    Preserves proper nouns and religious/folklore terms in transliteration.
     """
     if not text or not text.strip():
         print("detect_terms: Empty text provided", flush=True)
@@ -95,59 +87,31 @@ def detect_terms(text: str, source_language: str = 'hi') -> dict:
     language_name = LANGUAGE_NAMES.get(source_language, 'Hindi')
     client = get_client()
     
-    # Improved prompts with better accuracy requirements
-    prompts = [
-        # Strategy 1: Detailed and specific prompt
-        f"""Analyze this {language_name} text and extract ONLY specific cultural or India-specific terms.
-
-A "cultural term" is a SPECIFIC word or phrase that:
-- Refers to a specific Indian concept, item, or practice (e.g., "Diwali", "Sari", "Guru", "Namaste")
-- Is a proper noun for Indian festivals, foods, deities, places, or cultural practices
-- Is slang or expression unique to Indian culture
-- Is a traditional title, honorific, or role specific to India
-
-DO NOT include:
-- Generic words that could apply to any culture (like "god", "festival", "food")
-- Common words that exist in many languages
-- Abstract concepts without specific cultural context
-
-For each SPECIFIC cultural term found, provide:
-1. word: the exact word/phrase as it appears in the text
-2. pronunciation_japanese: how to pronounce it in Japanese using katakana (e.g., "イシュワラデーヴァ" for "Ishwaradeva")
-3. meaning_japanese: what this SPECIFIC term means in Japanese (not a generic translation)
-4. why_important: why THIS SPECIFIC term is culturally important in India
-
-Return ONLY valid JSON:
-{{"terms": [{{"word": "", "pronunciation_japanese": "", "meaning_japanese": "", "why_important": ""}}]}}
-
-Text to analyze:
-{text}""",
-        
-        # Strategy 2: More focused prompt
-        f"""Extract SPECIFIC cultural terms from this {language_name} text.
-
-Focus on:
-- Specific proper nouns (names of festivals, foods, deities, places)
-- Unique Indian cultural concepts
-- Traditional titles or roles
-- Cultural expressions or idioms
-
-Avoid generic words. Each term should be specific to Indian culture.
-
-For each term, return JSON with:
-- word: exact term from text
-- pronunciation_japanese: katakana pronunciation
-- meaning_japanese: specific meaning in Japanese
-- why_important: cultural significance
-
-Text: {text}""",
-        
-        # Strategy 3: Simple but specific
-        f"""Find SPECIFIC Indian cultural terms in: {text}
-
-Only extract terms that are uniquely Indian (festivals, foods, deities, cultural concepts).
-Return JSON: {{"terms": [{{"word": "...", "pronunciation_japanese": "...", "meaning_japanese": "...", "why_important": "..."}}]}}"""
-    ]
+    # Update the prompt to emphasize preserving proper nouns
+    prompt = f"""
+    Analyze the following {language_name} text and extract cultural or India-specific terms.
+    
+    IMPORTANT RULES:
+    1. Do NOT directly translate religious or folklore terms (e.g., Ishvara, Dharma, Brahmarakshasa)
+    2. Keep proper nouns in transliteration (e.g., Ishvara, Dharma, Brahmarakshasa)
+    3. Only translate terms that have clear Japanese equivalents
+    4. For religious/folklore terms, provide explanation in Japanese but keep the term in transliteration
+    
+    Return format (JSON only):
+    {{
+        "terms": [
+            {{
+                "word": "exact word from text",
+                "pronunciation_japanese": "カタカナでの発音",
+                "meaning_japanese": "日本語での意味",
+                "why_important": "文化的な重要性の説明"
+            }}
+        ]
+    }}
+    
+    Text to analyze:
+    {text}
+    """
     
     for attempt, prompt in enumerate(prompts, 1):
         try:

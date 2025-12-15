@@ -6,6 +6,7 @@ from backend_python.whisper_transcribe import transcribe_audio, transcribe_audio
 from backend_python.translate import translate_to_japanese
 from backend_python.detect_terms import detect_terms
 import re
+import unicodedata
 
 def verify_video_file(video_path: str) -> bool:
     """Verify that a video file is valid and not corrupted"""
@@ -113,76 +114,126 @@ def extract_audio_from_video(video_path: str, output_audio_path: str = None) -> 
 
 def transcribe_with_timestamps(audio_path: str, language: str = None) -> list:
     """
-    Transcribe audio and return segments with timestamps.
-    Uses Whisper API with word-level timestamps for accurate timing.
+    Transcribe audio and return segments with timestamps and detected language.
+    Uses Whisper's automatic language detection per segment.
     
     Args:
         audio_path: Path to audio file
-        language: Language code (hi, kn, ta). If None, auto-detect.
+        language: Language hint (optional, Whisper will auto-detect per segment)
+    
+    Returns:
+        List of segments with 'text', 'start', 'end', 'detected_language', 'script', 'confidence'
     """
     try:
-        # Try to get word-level timestamps
-        result = transcribe_audio_with_timestamps(audio_path, language=language)
+        # Use Whisper with auto-detection (don't pass language parameter)
+        result = transcribe_audio_with_timestamps(audio_path, language=None)
         
-        # Use segments from Whisper if available
+        # Process segments
         if hasattr(result, 'segments') and result.segments:
             segments = []
+            from backend_python.translate import detect_script_from_text, LANGUAGE_NAMES
+            
             for seg in result.segments:
                 # Handle both dict and object formats
                 if isinstance(seg, dict):
                     text = seg.get('text', '').strip()
                     start = seg.get('start', 0)
                     end = seg.get('end', 0)
+                    detected_lang = seg.get('detected_language') or seg.get('language')
+                    # Get no_speech_prob if available (confidence indicator)
+                    no_speech_prob = seg.get('no_speech_prob', 0.0)
                 else:
-                    # It's a TranscriptionSegment object
                     text = getattr(seg, 'text', '').strip()
                     start = getattr(seg, 'start', 0)
                     end = getattr(seg, 'end', 0)
+                    detected_lang = getattr(seg, 'detected_language', None) or getattr(seg, 'language', None)
+                    no_speech_prob = getattr(seg, 'no_speech_prob', 0.0)
                 
-                if text:
-                    segments.append({
-                        'start': start,
-                        'end': end,
-                        'text': text
-                    })
+                if not text:
+                    continue
+                
+                # Detect script (separate from language)
+                script = detect_script_from_text(text)
+                
+                # Map Whisper language codes to our codes
+                if detected_lang:
+                    lang_map = {'hi': 'hi', 'kn': 'kn', 'ta': 'ta', 'te': 'kn', 'mr': 'hi'}
+                    detected_lang = lang_map.get(detected_lang, detected_lang)
+                else:
+                    # Fallback: use passed language or default
+                    detected_lang = language or 'hi'
+                
+                # Calculate confidence (1 - no_speech_prob, higher is better)
+                confidence = 1.0 - no_speech_prob if no_speech_prob else 0.8
+                
+                # Reject low-confidence segments
+                CONFIDENCE_THRESHOLD = 0.5
+                if confidence < CONFIDENCE_THRESHOLD:
+                    print(f"Warning: Low confidence segment ({confidence:.2f}) - marking for review: {text[:50]}...", flush=True)
+                    needs_review = True
+                else:
+                    needs_review = False
+                
+                segments.append({
+                    'text': text,
+                    'start': start,
+                    'end': end,
+                    'detected_language': detected_lang,
+                    'script': script,
+                    'confidence': confidence,
+                    'needs_review': needs_review
+                })
             
             if segments:
+                print(f"Transcribed {len(segments)} segments with language detection", flush=True)
+                # Log language distribution
+                lang_counts = {}
+                for seg in segments:
+                    lang = seg['detected_language']
+                    lang_counts[lang] = lang_counts.get(lang, 0) + 1
+                print(f"Language distribution: {lang_counts}", flush=True)
                 return segments
         
         # Fallback: use text transcription and estimate timestamps
         if hasattr(result, 'text'):
             transcription = result.text
         else:
-            transcription = transcribe_audio(audio_path, language=language)
+            transcription = transcribe_audio(audio_path, language=None)
         
     except Exception as e:
         print(f"Error getting timestamps, using fallback: {e}", flush=True)
-        transcription = transcribe_audio(audio_path, language=language)
+        transcription = transcribe_audio(audio_path, language=None)
     
     # Fallback: Split transcription into sentences and estimate timestamps
-    # Use appropriate sentence delimiters for different languages
-    sentence_delimiters = r'[.!?।।]\s+'  # Works for Hindi, Kannada, Tamil
+    sentence_delimiters = r'[.!?।।]\s+'
     sentences = re.split(sentence_delimiters, transcription)
-    sentences = [s.strip() for s in sentences if s.strip()]
+    
+    # Estimate timestamps (simple approach)
+    estimated_duration = 30  # Assume 30 seconds if unknown
+    time_per_char = estimated_duration / len(transcription) if transcription else 0.1
     
     segments = []
     current_time = 0.0
+    from backend_python.translate import detect_script_from_text
     
     for sentence in sentences:
-        if not sentence:
+        sentence = sentence.strip()
+        if not sentence or len(sentence) < 3:
             continue
         
-        # Estimate duration based on character count (rough: 10 chars per second)
-        duration = max(2.0, len(sentence) / 10.0)
-        end_time = current_time + duration
+        sentence_duration = len(sentence) * time_per_char
+        script = detect_script_from_text(sentence)
         
         segments.append({
+            'text': sentence,
             'start': current_time,
-            'end': end_time,
-            'text': sentence
+            'end': current_time + sentence_duration,
+            'detected_language': language or 'hi',  # Fallback
+            'script': script,
+            'confidence': 0.7,  # Lower confidence for fallback
+            'needs_review': True
         })
-        
-        current_time = end_time + 0.5  # 0.5 second gap between subtitles
+        current_time += sentence_duration + 0.5  # 0.5 second gap
     
     return segments
 
@@ -270,6 +321,10 @@ def process_video_with_subtitles(
             
             # Check if any cultural terms appear in this segment
             source_text = segment['text']
+            
+            # Sanitize source text to prevent rendering issues
+            source_text = sanitize_subtitle_text(source_text)
+            
             cultural_annotations = []
             
             if term_info_map and source_text:
@@ -350,7 +405,10 @@ def process_video_with_subtitles(
             # Build subtitle text
             subtitle_lines = []
             subtitle_lines.append(source_text)  # Source language (first line)
-            subtitle_lines.append(japanese_text)  # Japanese translation (second line)
+            
+            # Sanitize Japanese text as well
+            japanese_text_sanitized = sanitize_subtitle_text(japanese_text)
+            subtitle_lines.append(japanese_text_sanitized)  # Japanese translation (second line)
             
             # Add cultural term annotations if any were found
             if cultural_annotations:
@@ -401,17 +459,12 @@ def process_video_with_subtitles(
 
 def process_trailer_video(video_path: str, output_path: str, language: str = None) -> dict:
     """
-    Complete workflow with multi-language support:
-    1. Extract audio from video
-    2. Transcribe audio (Hindi, Kannada, or Tamil)
-    3. Translate to Japanese
-    4. Generate subtitles
-    5. Burn subtitles into video
+    Complete workflow with per-segment language detection and translation.
     
     Args:
         video_path: Path to video file
         output_path: Path for output video
-        language: Language code (hi, kn, ta). If None, auto-detect.
+        language: Language hint (optional, Whisper will auto-detect per segment)
     
     Returns dict with transcription, translation, and output video path
     """
@@ -421,64 +474,161 @@ def process_trailer_video(video_path: str, output_path: str, language: str = Non
         temp_audio = video_path.rsplit('.', 1)[0] + '_temp_audio.mp3'
         extract_audio_from_video(video_path, temp_audio)
         
-        # Step 2: Transcribe with timestamps
-        source_segments = transcribe_with_timestamps(temp_audio, language=language)
-        source_text = ' '.join([seg['text'] for seg in source_segments])
+        # Step 2: Transcribe with timestamps and per-segment language detection
+        source_segments = transcribe_with_timestamps(temp_audio, language=None)  # Let Whisper auto-detect
         
-        # Validate transcription
-        if not source_text or not source_text.strip():
-            raise ValueError("Transcription resulted in empty text. The audio might not contain speech or the language might be incorrect.")
+        if not source_segments:
+            raise ValueError("No segments transcribed")
         
-        print(f"Transcribed text length: {len(source_text)} characters", flush=True)
-        print(f"Transcribed text preview: {source_text[:200]}...", flush=True)
+        # Step 3: Translate each segment using its detected language
+        translated_segments = []
+        all_cultural_terms = []
         
-        # Step 3: Translate to Japanese
-        try:
-            japanese_text = translate_to_japanese(source_text, source_language=language or 'hi')
+        from backend_python.translate import translate_segment_strict, LANGUAGE_NAMES
+        from backend_python.detect_terms import detect_terms
+        
+        for seg_idx, segment in enumerate(source_segments):
+            seg_text = segment['text']
+            seg_lang = segment.get('detected_language', 'hi')
+            seg_script = segment.get('script', 'Unknown')
+            seg_confidence = segment.get('confidence', 0.5)
+            needs_review = segment.get('needs_review', False)
             
-            # Validate translation
-            if not japanese_text or not japanese_text.strip():
-                raise ValueError("Translation resulted in empty text")
+            print(f"Segment {seg_idx + 1}/{len(source_segments)}: lang={seg_lang}, script={seg_script}, confidence={seg_confidence:.2f}", flush=True)
             
-            print(f"Translation successful. Length: {len(japanese_text)} characters", flush=True)
-        except Exception as translate_error:
-            print(f"Translation error: {translate_error}", flush=True)
-            # Return a placeholder or re-raise
-            raise Exception(f"Failed to translate text: {str(translate_error)}")
-        
-        # Step 3.5: Detect cultural terms (non-blocking, continue even if it fails)
-        detected_terms = None
-        try:
-            from backend_python.detect_terms import detect_terms
-            detected_terms = detect_terms(source_text, source_language=language or 'hi')
+            # Skip low-confidence segments or mark for review
+            if needs_review:
+                print(f"  Warning: Low confidence segment, may need review", flush=True)
             
-            # Validate the result
-            if detected_terms and isinstance(detected_terms, dict):
-                terms_list = detected_terms.get('terms', [])
-                if terms_list and len(terms_list) > 0:
-                    print(f"Detected {len(terms_list)} cultural terms", flush=True)
-                else:
-                    print(f"No cultural terms detected (returned empty list)", flush=True)
-            else:
-                print(f"detect_terms returned invalid format: {detected_terms}", flush=True)
-                detected_terms = {"terms": []}
-        except Exception as e:
-            print(f"Error detecting terms (non-critical): {e}", flush=True)
-            detected_terms = {"terms": []}
+            # Translate segment using STRICT translation (no language detection, no meta commentary)
+            try:
+                japanese_text = translate_segment_strict(seg_text, seg_lang, seg_script)
+                
+                if not japanese_text or not japanese_text.strip():
+                    print(f"  Warning: Empty translation for segment {seg_idx + 1}", flush=True)
+                    japanese_text = ""  # Empty string, not error message
+                
+                # Detect cultural terms for this segment (after translation)
+                segment_terms = []
+                try:
+                    terms_result = detect_terms(seg_text, source_language=seg_lang)
+                    if terms_result and isinstance(terms_result, dict):
+                        terms_list = terms_result.get('terms', [])
+                        segment_terms = terms_list
+                        all_cultural_terms.extend(terms_list)
+                except Exception as e:
+                    print(f"  Error detecting terms for segment {seg_idx + 1}: {e}", flush=True)
+                
+                translated_segments.append({
+                    'text_original': seg_text,
+                    'language': seg_lang,
+                    'script': seg_script,
+                    'translation_ja': japanese_text,
+                    'cultural_terms': segment_terms,
+                    'start': segment['start'],
+                    'end': segment['end'],
+                    'confidence': seg_confidence,
+                    'needs_review': needs_review
+                })
+                
+            except Exception as e:
+                print(f"  Error translating segment {seg_idx + 1}: {e}", flush=True)
+                # Add segment with empty translation (not error message)
+                translated_segments.append({
+                    'text_original': seg_text,
+                    'language': seg_lang,
+                    'script': seg_script,
+                    'translation_ja': "",  # Empty, not error message
+                    'cultural_terms': [],
+                    'start': segment['start'],
+                    'end': segment['end'],
+                    'confidence': seg_confidence,
+                    'needs_review': True
+                })
         
-        # Step 4 & 5: Burn subtitles into video (pass detected_terms)
-        process_video_with_subtitles(video_path, output_path, source_segments, japanese_text, detected_terms=detected_terms)
+        # Combine translations (filter out empty translations)
+        source_text = ' '.join([seg['text_original'] for seg in translated_segments])
+        japanese_text = ' '.join([seg['translation_ja'] for seg in translated_segments if seg['translation_ja']])
+        
+        # Aggregate cultural terms (deduplicate)
+        unique_terms = {}
+        for term in all_cultural_terms:
+            term_word = term.get('word', '')
+            if term_word and term_word not in unique_terms:
+                unique_terms[term_word] = term
+        detected_terms = {"terms": list(unique_terms.values())}
+        
+        print(f"Translation complete: {len(translated_segments)} segments, {len(detected_terms.get('terms', []))} unique cultural terms", flush=True)
+        
+        # Step 4 & 5: Burn subtitles into video
+        # Convert translated_segments to format expected by process_video_with_subtitles
+        subtitle_segments = []
+        for seg in translated_segments:
+            subtitle_segments.append({
+                'text': seg['text_original'],
+                'start': seg['start'],
+                'end': seg['end']
+            })
+        
+        process_video_with_subtitles(video_path, output_path, subtitle_segments, japanese_text, detected_terms=detected_terms)
         
         return {
             'source_transcription': source_text,
             'japanese_translation': japanese_text,
             'detected_terms': detected_terms,
             'output_video': output_path,
-            'segments': source_segments,
-            'language': language or 'auto-detected'
+            'segments': translated_segments,  # Full structured output
+            'language': 'mixed' if len(set(s['language'] for s in translated_segments)) > 1 else translated_segments[0]['language'] if translated_segments else 'unknown'
         }
     finally:
         # Clean up temporary audio file
         if temp_audio and os.path.exists(temp_audio):
             os.unlink(temp_audio)
+
+def sanitize_subtitle_text(text: str) -> str:
+    """
+    Sanitize subtitle text to remove characters that cause rendering issues in FFmpeg subtitles.
+    """
+    if not text:
+        return text
+    
+    import unicodedata
+    
+    result = []
+    for char in text:
+        # Get Unicode category
+        category = unicodedata.category(char)
+        
+        # Keep:
+        # - Letters (L*)
+        # - Numbers (N*)
+        # - Punctuation (P*)
+        # - Symbols (S*)
+        # - Spaces, newlines, tabs
+        # - Common punctuation marks
+        
+        if category[0] in 'LNP' or category == 'Zs' or char in '\n\t':
+            # Additional check: ensure it's a valid, renderable character
+            try:
+                # Try to normalize and encode
+                normalized = unicodedata.normalize('NFKC', char)
+                normalized.encode('utf-8')
+                result.append(normalized)
+            except:
+                # Skip characters that can't be encoded
+                continue
+        elif category[0] == 'C':
+            # Control characters - replace with space (except newline/tab)
+            if char not in '\n\t':
+                result.append(' ')
+        else:
+            # Keep other characters (spaces, etc.)
+            result.append(char)
+    
+    # Clean up multiple spaces
+    cleaned = ''.join(result)
+    cleaned = re.sub(r' +', ' ', cleaned)
+    cleaned = re.sub(r'\n\s*\n', '\n', cleaned)
+    
+    return cleaned.strip()
 

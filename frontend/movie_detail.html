@@ -209,7 +209,11 @@
 
                     if (response.ok) {
                         statusDiv.className = 'upload-status success';
-                        statusText.textContent = '✅ トレーラーの処理が完了しました！字幕付き動画が生成されました。';
+                        if (data.cached) {
+                            statusText.textContent = '✅ キャッシュからデータを取得しました！';
+                        } else {
+                            statusText.textContent = '✅ トレーラーの処理が完了しました！字幕付き動画が生成されました。';
+                        }
 
                         // Show transcription and translation
                         let detailsHtml = `
@@ -234,10 +238,10 @@
                                 const pronunciation = term.pronunciation_japanese || '';
                                 const meaning = term.meaning_japanese || 'N/A';
                                 // Format: カタカナ発音 (意味)
-                                const meaningDisplay = pronunciation 
-                                    ? `${pronunciation} (${meaning})` 
+                                const meaningDisplay = pronunciation
+                                    ? `${pronunciation} (${meaning})`
                                     : meaning;
-                                
+
                                 termsHtml += `
                                     <div style="margin-top: 15px; padding: 10px; border-left: 3px solid #007bff; background: #f8f9fa;">
                                         <div><strong>用語 ${index + 1}:</strong> ${term.word || 'N/A'}</div>
@@ -272,7 +276,7 @@
                                 </div>
                             `;
                         }
-                        
+
                         // Add processed video with subtitles if available
                         if (data.output_video) {
                             // Extract filename from path
