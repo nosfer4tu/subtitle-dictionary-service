@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="ja">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>Moviary - ホーム</title>
+        <!-- <link
+            rel="stylesheet"
+            href="{{ url_for('static', filename='css/style.css') }}"
+        /> -->
+        <style>
+            .movie-item {
+                cursor: pointer;
+                transition: opacity 0.3s;
+            }
+            .movie-item:hover {
+                opacity: 0.8;
+            }
+            .movie-item.loading {
+                opacity: 0.5;
+                pointer-events: none;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="main-content">
+                <h2>映画を探す</h2>
+                <form
+                    method="GET"
+                    action="{{ url_for('index') }}"
+                    class="search-form"
+                >
+                    <input
+                        type="text"
+                        name="query"
+                        placeholder="映画のタイトルを入力"
+                        value="{{ query }}"
+                    />
+                    <input type="submit" value="検索" />
+                </form>
+
+                {% if query and not movies %}
+                <div class="movie-list">
+                    <p>
+                        検索結果が見つかりませんでした。別のキーワードで検索してください。
+                    </p>
+                </div>
+                {% elif movies %}
+                <div class="movie-list">
+                    <h3>検索結果</h3>
+                    {% for movie in movies %}
+                    <div
+                        class="movie-item"
+                        data-movie-id="{{ movie.id }}"
+                        data-movie-title="{{ movie.title }}"
+                    >
+                        <img
+                            src="{{ movie.api_url }}"
+                            alt="{{ movie.title }}"
+                            class="movie-poster"
+                        />
+                        <p>{{ movie.title }}</p>
+                    </div>
+                    {% endfor %}
+                </div>
+                {% endif %}
+                <div class="movie-list">
+                    <h3>インド映画おすすめ</h3>
+                    {% for movie in indian_movies %}
+                    <div
+                        class="movie-item"
+                        data-movie-id="{{ movie.id }}"
+                        data-movie-title="{{ movie.title }}"
+                    >
+                        <img
+                            src="{{ movie.api_url }}"
+                            alt="{{ movie.title }}"
+                            class="movie-poster"
+                        />
+                        <p>{{ movie.title }}</p>
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+        </div>
+        <script>
+            document.addEventListener('DOMContentLoaded', function () {
+                const movieItems = document.querySelectorAll(
+                    '.movie-item[data-movie-id]',
+                );
+
+                movieItems.forEach((item) => {
+                    item.addEventListener('click', function () {
+                        const movieId = this.getAttribute('data-movie-id');
+                        // Navigate to movie detail page
+                        window.location.href = `/movie/${movieId}`;
+                    });
+                });
+            });
+        </script>
+    </body>
+</html>

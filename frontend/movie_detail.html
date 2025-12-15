@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="ja">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>Moviary - {{ movie.title }}</title>
+        <style>
+            body {
+                font-family: Arial, sans-serif;
+                margin: 0;
+                padding: 20px;
+                background-color: #f5f5f5;
+            }
+            .container {
+                max-width: 1200px;
+                margin: 0 auto;
+                background: white;
+                padding: 30px;
+                border-radius: 10px;
+                box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+            }
+            .back-link {
+                display: inline-block;
+                margin-bottom: 20px;
+                color: #007bff;
+                text-decoration: none;
+            }
+            .back-link:hover {
+                text-decoration: underline;
+            }
+            .movie-header {
+                display: flex;
+                gap: 30px;
+                margin-bottom: 30px;
+            }
+            .movie-poster {
+                width: 300px;
+                height: auto;
+                border-radius: 10px;
+                box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+            }
+            .movie-info {
+                flex: 1;
+            }
+            .movie-title {
+                font-size: 2.5em;
+                margin: 0 0 10px 0;
+                color: #333;
+            }
+            .movie-meta {
+                color: #666;
+                margin-bottom: 20px;
+            }
+            .movie-overview {
+                font-size: 1.1em;
+                line-height: 1.6;
+                color: #444;
+                margin-bottom: 20px;
+            }
+            .genres {
+                display: flex;
+                gap: 10px;
+                flex-wrap: wrap;
+                margin-bottom: 20px;
+            }
+            .genre-tag {
+                background: #007bff;
+                color: white;
+                padding: 5px 15px;
+                border-radius: 20px;
+                font-size: 0.9em;
+            }
+            .upload-section {
+                margin-top: 30px;
+                padding: 20px;
+                background: #f8f9fa;
+                border-radius: 8px;
+            }
+            .upload-status {
+                padding: 15px;
+                border-radius: 5px;
+                margin-bottom: 15px;
+            }
+            .upload-status.loading {
+                background: #fff3cd;
+                color: #856404;
+                border: 1px solid #ffc107;
+            }
+            .upload-status.success {
+                background: #d4edda;
+                color: #155724;
+                border: 1px solid #28a745;
+            }
+            .upload-status.error {
+                background: #f8d7da;
+                color: #721c24;
+                border: 1px solid #dc3545;
+            }
+            .trailer-embed {
+                margin-top: 20px;
+                width: 100%;
+                max-width: 800px;
+            }
+            .trailer-embed iframe {
+                width: 100%;
+                height: 450px;
+                border-radius: 8px;
+            }
+            .spinner {
+                border: 3px solid #f3f3f3;
+                border-top: 3px solid #007bff;
+                border-radius: 50%;
+                width: 30px;
+                height: 30px;
+                animation: spin 1s linear infinite;
+                display: inline-block;
+                margin-right: 10px;
+                vertical-align: middle;
+            }
+            @keyframes spin {
+                0% {
+                    transform: rotate(0deg);
+                }
+                100% {
+                    transform: rotate(360deg);
+                }
+            }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <a href="{{ url_for('index') }}" class="back-link">← 戻る</a>
+
+            <div class="movie-header">
+                {% if movie.poster_path %}
+                <img
+                    src="{{ movie.poster_path }}"
+                    alt="{{ movie.title }}"
+                    class="movie-poster"
+                />
+                {% endif %}
+                <div class="movie-info">
+                    <h1 class="movie-title">{{ movie.title }}</h1>
+                    <div class="movie-meta">
+                        {% if movie.release_date %}
+                        <p>公開日: {{ movie.release_date }}</p>
+                        {% endif %} {% if movie.vote_average %}
+                        <p>
+                            評価: ⭐ {{ "%.1f"|format(movie.vote_average) }}/10
+                        </p>
+                        {% endif %}
+                    </div>
+                    {% if movie.genres %}
+                    <div class="genres">
+                        {% for genre in movie.genres %}
+                        <span class="genre-tag">{{ genre }}</span>
+                        {% endfor %}
+                    </div>
+                    {% endif %} {% if movie.overview %}
+                    <div class="movie-overview">
+                        <h3>あらすじ</h3>
+                        <p>{{ movie.overview }}</p>
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+
+            <div class="upload-section">
+                <h2>トレーラーアップロード</h2>
+                <div id="upload-status" class="upload-status loading">
+                    <span class="spinner"></span>
+                    <span id="status-text">トレーラーを処理しています...</span>
+                </div>
+                <div id="trailer-container"></div>
+            </div>
+        </div>
+
+        <script>
+            const movieId = {{ movie.id }};
+            const movieTitle = {{ movie.title|tojson }};
+            const trailerUrl = {{ trailer_url|tojson if trailer_url else 'null' }};
+
+            async function uploadTrailer() {
+                const statusDiv = document.getElementById('upload-status');
+                const statusText = document.getElementById('status-text');
+                const trailerContainer = document.getElementById('trailer-container');
+
+                if (!trailerUrl) {
+                    statusDiv.className = 'upload-status error';
+                    statusText.textContent = 'この映画のトレーラーが見つかりませんでした。';
+                    return;
+                }
+
+                try {
+                    statusText.textContent = 'トレーラーをダウンロードしています...';
+
+                    const response = await fetch('/api/upload-trailer', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify({
+                            movie_id: movieId,
+                            movie_title: movieTitle,
+                        }),
+                    });
+
+                    const data = await response.json();
+
+                    if (response.ok) {
+                        statusDiv.className = 'upload-status success';
+                        statusText.textContent = '✅ トレーラーの処理が完了しました！字幕付き動画が生成されました。';
+
+                        // Show transcription and translation
+                        let detailsHtml = `
+                            <div style="margin-top: 20px; padding: 15px; background: white; border-radius: 5px;">
+                                <h4>処理結果</h4>
+                                <div style="margin-top: 10px;">
+                                    <strong>原文の文字起こし:</strong>
+                                    <p style="margin-top: 5px; color: #555;">${data.source_transcription || data.hindi_transcription || 'N/A'}</p>
+                                </div>
+                                <div style="margin-top: 15px;">
+                                    <strong>日本語翻訳:</strong>
+                                    <p style="margin-top: 5px; color: #555;">${data.japanese_translation || 'N/A'}</p>
+                                </div>
+                                ${data.language ? `<div style="margin-top: 10px; font-size: 0.9em; color: #888;">言語: ${data.language}</div>` : ''}
+                            </div>
+                        `;
+
+                        // Show detected cultural terms
+                        if (data.detected_terms && data.detected_terms.terms && data.detected_terms.terms.length > 0) {
+                            let termsHtml = '<div style="margin-top: 20px; padding: 15px; background: white; border-radius: 5px;"><h4>検出された文化的用語</h4>';
+                            data.detected_terms.terms.forEach((term, index) => {
+                                const pronunciation = term.pronunciation_japanese || '';
+                                const meaning = term.meaning_japanese || 'N/A';
+                                // Format: カタカナ発音 (意味)
+                                const meaningDisplay = pronunciation 
+                                    ? `${pronunciation} (${meaning})` 
+                                    : meaning;
+                                
+                                termsHtml += `
+                                    <div style="margin-top: 15px; padding: 10px; border-left: 3px solid #007bff; background: #f8f9fa;">
+                                        <div><strong>用語 ${index + 1}:</strong> ${term.word || 'N/A'}</div>
+                                        <div style="margin-top: 5px;"><strong>日本語の意味:</strong> ${meaningDisplay}</div>
+                                        <div style="margin-top: 5px;"><strong>文化的な重要性:</strong> ${term.why_important || 'N/A'}</div>
+                                    </div>
+                                `;
+                            });
+                            termsHtml += '</div>';
+                            detailsHtml += termsHtml;
+                        } else {
+                            detailsHtml += `
+                                <div style="margin-top: 20px; padding: 15px; background: white; border-radius: 5px;">
+                                    <h4>検出された文化的用語</h4>
+                                    <p style="color: #888;">文化的用語は検出されませんでした。</p>
+                                </div>
+                            `;
+                        }
+
+                        // Extract YouTube video ID for embedding
+                        const videoId = data.video_id;
+                        if (videoId) {
+                            detailsHtml += `
+                                <div class="trailer-embed" style="margin-top: 20px;">
+                                    <h3>元のトレーラー</h3>
+                                    <iframe
+                                        src="https://www.youtube.com/embed/${videoId}"
+                                        frameborder="0"
+                                        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                                        allowfullscreen
+                                    ></iframe>
+                                </div>
+                            `;
+                        }
+                        
+                        // Add processed video with subtitles if available
+                        if (data.output_video) {
+                            // Extract filename from path
+                            const videoFilename = data.output_video.split('/').pop();
+                            detailsHtml += `
+                                <div class="processed-video" style="margin-top: 20px;">
+                                    <h3>字幕付き動画</h3>
+                                    <video controls style="width: 100%; max-width: 800px; border-radius: 5px;">
+                                        <source src="/api/video/${videoFilename}" type="video/mp4">
+                                        お使いのブラウザは動画タグをサポートしていません。
+                                    </video>
+                                </div>
+                            `;
+                        }
+
+                        trailerContainer.innerHTML = detailsHtml;
+                    } else {
+                        statusDiv.className = 'upload-status error';
+                        statusText.textContent = `エラー: ${data.error}`;
+                    }
+                } catch (error) {
+                    console.error('Error:', error);
+                    statusDiv.className = 'upload-status error';
+                    statusText.textContent = 'トレーラーの処理中にエラーが発生しました。もう一度お試しください。';
+                }
+            }
+
+            // Automatically start upload when page loads
+            document.addEventListener('DOMContentLoaded', uploadTrailer);
+        </script>
+    </body>
+</html>
