@@ -3,7 +3,6 @@ import subprocess
 import tempfile
 from pydub import AudioSegment
 from backend_python.whisper_transcribe import transcribe_audio, transcribe_audio_with_timestamps
-from backend_python.translate import translate_to_japanese
 from backend_python.detect_terms import detect_terms
 import re
 import unicodedata
@@ -184,8 +183,88 @@ def transcribe_with_timestamps(audio_path: str, language: str = None) -> list:
                     'needs_review': needs_review
                 })
             
+            # AGGRESSIVE SEGMENTATION: Split segments longer than 6 seconds
+            # Target: 3-6 seconds max per segment
+            split_segments = []
+            MAX_SEGMENT_DURATION = 6.0  # 6 seconds max
+            TARGET_SEGMENT_DURATION = 4.5  # Target ~4.5 seconds
+            
+            for seg in segments:
+                duration = seg['end'] - seg['start']
+                
+                if duration <= MAX_SEGMENT_DURATION:
+                    # Segment is acceptable length
+                    split_segments.append(seg)
+                else:
+                    # Split long segment into smaller chunks
+                    num_splits = int(duration / TARGET_SEGMENT_DURATION) + 1
+                    split_duration = duration / num_splits
+                    
+                    # Split text by sentences or punctuation
+                    import re
+                    text = seg['text']
+                    # Try to split on sentence boundaries
+                    sentences = re.split(r'([.!?।।]\s+)', text)
+                    
+                    # If we have sentence boundaries, split evenly across them
+                    if len(sentences) > 1:
+                        sentences_per_chunk = max(1, len(sentences) // num_splits)
+                        current_chunk_text = []
+                        current_chunk_start = seg['start']
+                        chunk_idx = 0
+                        
+                        for i, sentence in enumerate(sentences):
+                            current_chunk_text.append(sentence)
+                            
+                            # Create chunk when we have enough sentences or reach end
+                            if (i + 1) % sentences_per_chunk == 0 or i == len(sentences) - 1:
+                                chunk_text = ''.join(current_chunk_text).strip()
+                                if chunk_text:
+                                    chunk_end = seg['start'] + (chunk_idx + 1) * split_duration
+                                    if chunk_end > seg['end']:
+                                        chunk_end = seg['end']
+                                    
+                                    split_segments.append({
+                                        'text': chunk_text,
+                                        'start': current_chunk_start,
+                                        'end': chunk_end,
+                                        'detected_language': seg['detected_language'],
+                                        'script': seg['script'],
+                                        'confidence': seg['confidence'],
+                                        'needs_review': seg['needs_review']
+                                    })
+                                    
+                                    current_chunk_start = chunk_end
+                                    current_chunk_text = []
+                                    chunk_idx += 1
+                    else:
+                        # No sentence boundaries - split by character count
+                        chars_per_chunk = len(text) // num_splits
+                        for i in range(num_splits):
+                            chunk_start_idx = i * chars_per_chunk
+                            chunk_end_idx = (i + 1) * chars_per_chunk if i < num_splits - 1 else len(text)
+                            chunk_text = text[chunk_start_idx:chunk_end_idx].strip()
+                            
+                            if chunk_text:
+                                chunk_start = seg['start'] + i * split_duration
+                                chunk_end = seg['start'] + (i + 1) * split_duration
+                                if chunk_end > seg['end']:
+                                    chunk_end = seg['end']
+                                
+                                split_segments.append({
+                                    'text': chunk_text,
+                                    'start': chunk_start,
+                                    'end': chunk_end,
+                                    'detected_language': seg['detected_language'],
+                                    'script': seg['script'],
+                                    'confidence': seg['confidence'],
+                                    'needs_review': seg['needs_review']
+                                })
+            
+            segments = split_segments
+            
             if segments:
-                print(f"Transcribed {len(segments)} segments with language detection", flush=True)
+                print(f"Transcribed {len(segments)} segments with language detection (after aggressive segmentation)", flush=True)
                 # Log language distribution
                 lang_counts = {}
                 for seg in segments:
@@ -484,7 +563,7 @@ def process_trailer_video(video_path: str, output_path: str, language: str = Non
         translated_segments = []
         all_cultural_terms = []
         
-        from backend_python.translate import translate_segment_strict, LANGUAGE_NAMES
+        from backend_python.translate import process_transcription_pipeline, LANGUAGE_NAMES
         from backend_python.detect_terms import detect_terms
         
         for seg_idx, segment in enumerate(source_segments):
@@ -500,13 +579,44 @@ def process_trailer_video(video_path: str, output_path: str, language: str = Non
             if needs_review:
                 print(f"  Warning: Low confidence segment, may need review", flush=True)
             
-            # Translate segment using STRICT translation (no language detection, no meta commentary)
+            # === USE MAIN PIPELINE: Process through Call 1 → has_clear_english() → Call 2 ===
+            # This is the ONLY allowed translation path - enforces all gates
             try:
-                japanese_text = translate_segment_strict(seg_text, seg_lang, seg_script)
+                # Process segment through the strict pipeline
+                pipeline_result = process_transcription_pipeline(seg_text)
                 
+                # Extract Japanese translation from pipeline result
+                # Format: "Sentence 1: <translation>\nSentence 2: <translation>"
+                japanese_translation_text = pipeline_result.get('japanese_translation', '')
+                
+                # === DEBUG: Pipeline result for this segment ===
+                print("=" * 80, flush=True)
+                print(f"=== DEBUG: Pipeline result for segment {seg_idx + 1} ===", flush=True)
+                print(f"  japanese_translation_text: {repr(japanese_translation_text[:200])}", flush=True)
+                print("=" * 80, flush=True)
+                
+                # Parse the formatted output to extract just the translation text
+                # Remove "Sentence X: " prefixes and join lines
+                if japanese_translation_text:
+                    lines = japanese_translation_text.split('\n')
+                    translation_lines = []
+                    for line in lines:
+                        # Remove "Sentence X: " prefix if present
+                        if ': ' in line:
+                            translation = line.split(': ', 1)[1]
+                        else:
+                            translation = line
+                        if translation.strip():
+                            translation_lines.append(translation.strip())
+                    japanese_text = ' '.join(translation_lines) if translation_lines else ""
+                else:
+                    japanese_text = ""
+                
+                # If pipeline returned empty (gate blocked or Call 2 failed), leave empty
+                # DO NOT replace with placeholder - empty is correct for both cases
                 if not japanese_text or not japanese_text.strip():
-                    print(f"  Warning: Empty translation for segment {seg_idx + 1}", flush=True)
-                    japanese_text = ""  # Empty string, not error message
+                    print(f"  Pipeline returned empty for segment {seg_idx + 1} - leaving empty (no placeholder)", flush=True)
+                    japanese_text = ""  # Empty string - correct behavior (gate blocked OR Call 2 returned empty)
                 
                 # Detect cultural terms for this segment (after translation)
                 segment_terms = []
@@ -550,6 +660,14 @@ def process_trailer_video(video_path: str, output_path: str, language: str = Non
         source_text = ' '.join([seg['text_original'] for seg in translated_segments])
         japanese_text = ' '.join([seg['translation_ja'] for seg in translated_segments if seg['translation_ja']])
         
+        # === DEBUG: Final combined japanese_text before return ===
+        print("=" * 80, flush=True)
+        print("=== DEBUG: Final combined japanese_text ===", flush=True)
+        print(f"  japanese_text length: {len(japanese_text) if japanese_text else 0}", flush=True)
+        print(f"  japanese_text preview: {repr(japanese_text[:200]) if japanese_text else 'EMPTY'}", flush=True)
+        print(f"  Contains placeholder: {'意味不明' in japanese_text if japanese_text else False}", flush=True)
+        print("=" * 80, flush=True)
+        
         # Aggregate cultural terms (deduplicate)
         unique_terms = {}
         for term in all_cultural_terms:
@@ -572,9 +690,26 @@ def process_trailer_video(video_path: str, output_path: str, language: str = Non
         
         process_video_with_subtitles(video_path, output_path, subtitle_segments, japanese_text, detected_terms=detected_terms)
         
+        # === FINAL SAFEGUARD: Ensure empty strings are NEVER replaced with placeholders ===
+        # If japanese_text is empty (all segments filtered out or Call 2 returned empty), leave it empty
+        # DO NOT add placeholder - empty is correct for sentences that passed gate but have no translation
+        if not japanese_text or not japanese_text.strip():
+            print("=" * 80, flush=True)
+            print("FINAL SAFEGUARD: japanese_text is empty - leaving empty (NO placeholder)", flush=True)
+            print(f"  This is correct for: passed sentences with empty Call 2 output", flush=True)
+            print("=" * 80, flush=True)
+            japanese_text = ""  # Explicitly ensure it's empty, not a placeholder
+        
+        # Verify no placeholder was accidentally added
+        if "意味不明" in japanese_text and not any(seg.get('translation_ja', '').startswith("意味不明") for seg in translated_segments if seg.get('translation_ja')):
+            print("=" * 80, flush=True)
+            print("WARNING: Placeholder detected in final japanese_text but not in segments!", flush=True)
+            print(f"  japanese_text: {repr(japanese_text[:100])}", flush=True)
+            print("=" * 80, flush=True)
+        
         return {
             'source_transcription': source_text,
-            'japanese_translation': japanese_text,
+            'japanese_translation': japanese_text,  # Empty string if no translations - DO NOT replace
             'detected_terms': detected_terms,
             'output_video': output_path,
             'segments': translated_segments,  # Full structured output

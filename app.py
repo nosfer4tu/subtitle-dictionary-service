@@ -5,7 +5,7 @@ import os
 from contextlib import contextmanager
 from dotenv import load_dotenv
 from pathlib import Path
-from backend_python.auth import auth_blueprint
+from backend_python.auth import auth_blueprint, create_users_table
 from backend_python.tmdb import search_movies, fetch_indian_movies, get_movie_trailer, get_movie_details
 from backend_python.youtube_upload import download_video, extract_video_id
 from backend_python.subtitle_processor import process_trailer_video
@@ -27,7 +27,16 @@ app = Flask(__name__, template_folder='./frontend')
 app.secret_key = os.environ.get("SECRET_KEY")
 app.register_blueprint(auth_blueprint)
 
-# Initialize movie cache table on startup
+# Pipeline version for cache invalidation
+# Increment this when the translation pipeline logic changes
+PIPELINE_VERSION = 2
+
+# Initialize database tables on startup
+try:
+    create_users_table()
+except Exception as e:
+    print(f"Warning: Could not initialize users table: {e}", flush=True)
+
 try:
     create_movie_cache_table()
 except Exception as e:
@@ -110,41 +119,54 @@ def upload_trailer():
         cached_data = get_cached_movie(movie_id=movie_id, video_id=video_id)
         
         if cached_data:
-            print(f"✓ Found cached data for movie_id={movie_id}, video_id={video_id}", flush=True)
+            # Check pipeline version for cache invalidation
+            cached_version = cached_data.get('pipeline_version', 1)  # Default to 1 for old cache entries
             
-            # Log what we retrieved from cache
-            terms_count = 0
-            if cached_data.get('detected_terms') and isinstance(cached_data['detected_terms'], dict):
-                terms_count = len(cached_data['detected_terms'].get('terms', []))
-            print(f"✓ Retrieved from cache: transcription ({len(cached_data.get('source_transcription', '') or '')} chars), translation ({len(cached_data.get('japanese_translation', '') or '')} chars), {terms_count} cultural terms", flush=True)
-            
-            # Check if we have a cached processed video
-            cached_video_path = cached_data.get('cached_video_path')
-            output_video = None
-            
-            if cached_video_path and os.path.exists(cached_video_path):
-                # Copy cached video to temp location for serving
-                with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as tmp_file:
-                    output_video = tmp_file.name
-                shutil.copy2(cached_video_path, output_video)
-                print(f"Using cached processed video: {cached_video_path}", flush=True)
-            
-            return jsonify({
-                'success': True,
-                'trailer_url': trailer_url,
-                'video_id': video_id,
-                'movie_title': movie_title,
-                'source_transcription': cached_data['source_transcription'],
-                'japanese_translation': cached_data['japanese_translation'],
-                'detected_terms': cached_data['detected_terms'],  # Cultural terms from cache
-                'language': cached_data['language'],
-                'output_video': output_video.split('/')[-1] if output_video else None,  # Just filename for serving
-                'cached': True,
-                'message': 'Trailer data retrieved from cache!'
-            })
+            if cached_version == PIPELINE_VERSION:
+                # Cache hit (valid) - version matches
+                print(f"✓ CACHE HIT (valid): Found cached data for movie_id={movie_id}, video_id={video_id}, pipeline_version={cached_version}", flush=True)
+                
+                # Log what we retrieved from cache
+                terms_count = 0
+                if cached_data.get('detected_terms') and isinstance(cached_data['detected_terms'], dict):
+                    terms_count = len(cached_data['detected_terms'].get('terms', []))
+                print(f"✓ Retrieved from cache: transcription ({len(cached_data.get('source_transcription', '') or '')} chars), translation ({len(cached_data.get('japanese_translation', '') or '')} chars), {terms_count} cultural terms", flush=True)
+                
+                # Check if we have a cached processed video
+                cached_video_path = cached_data.get('cached_video_path')
+                output_video = None
+                
+                if cached_video_path and os.path.exists(cached_video_path):
+                    # Copy cached video to temp location for serving
+                    with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as tmp_file:
+                        output_video = tmp_file.name
+                    shutil.copy2(cached_video_path, output_video)
+                    print(f"Using cached processed video: {cached_video_path}", flush=True)
+                
+                return jsonify({
+                    'success': True,
+                    'trailer_url': trailer_url,
+                    'video_id': video_id,
+                    'movie_title': movie_title,
+                    'source_transcription': cached_data['source_transcription'],
+                    'japanese_translation': cached_data['japanese_translation'],
+                    'detected_terms': cached_data['detected_terms'],  # Cultural terms from cache
+                    'language': cached_data['language'],
+                    'output_video': output_video.split('/')[-1] if output_video else None,  # Just filename for serving
+                    'cached': True,
+                    'message': 'Trailer data retrieved from cache!'
+                })
+            else:
+                # Cache hit (stale) - version mismatch, ignore cache and run pipeline
+                print(f"⚠️  CACHE HIT (stale, ignored): Found cached data but pipeline_version mismatch (cached={cached_version}, current={PIPELINE_VERSION})", flush=True)
+                print(f"   Ignoring stale cache and running full translation pipeline...", flush=True)
+                cached_data = None  # Treat as cache miss to run pipeline
         
-        # Not in cache, process the video
-        print(f"✗ No cache found for movie_id={movie_id}, processing...", flush=True)
+        if not cached_data:
+            # Cache miss or stale - process the video
+            if cached_data is None:
+                print(f"✗ CACHE MISS: No cache found for movie_id={movie_id}, processing...", flush=True)
+            # (If cached_data was set to None above, we already logged the stale cache message)
         
         # Check for cached raw video first (avoid re-downloading)
         cached_raw_video = get_cached_raw_video(video_id)
@@ -213,7 +235,8 @@ def upload_trailer():
                 detected_terms=result.get('detected_terms'),  # Cultural terms saved here
                 language=result.get('language'),
                 segments=result.get('segments'),
-                processed_video_path=result['output_video']
+                processed_video_path=result['output_video'],
+                pipeline_version=PIPELINE_VERSION
             )
             print(f"✓ Saved processed movie to cache: movie_id={movie_id} (including {terms_count} cultural terms)", flush=True)
         except Exception as cache_error:

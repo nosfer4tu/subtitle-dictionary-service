@@ -113,7 +113,8 @@ def detect_terms(text: str, source_language: str = 'hi') -> dict:
     {text}
     """
     
-    for attempt, prompt in enumerate(prompts, 1):
+    # Retry loop with up to 3 attempts
+    for attempt in range(1, 4):
         try:
             print(f"detect_terms attempt {attempt}/3 for {language_name} text (length: {len(text)})", flush=True)
             
@@ -144,26 +145,26 @@ def detect_terms(text: str, source_language: str = 'hi') -> dict:
                 try:
                     result = json.loads(json_text)
                 except:
-                    if attempt < len(prompts):
+                    if attempt < 3:
                         continue
                     raise
             
             # Validate structure
             if not isinstance(result, dict):
                 print(f"Result is not a dict: {type(result)}", flush=True)
-                if attempt < len(prompts):
+                if attempt < 3:
                     continue
                 return {"terms": []}
             
             if 'terms' not in result:
                 print(f"Missing 'terms' key. Keys: {list(result.keys())}", flush=True)
-                if attempt < len(prompts):
+                if attempt < 3:
                     continue
                 return {"terms": []}
             
             if not isinstance(result['terms'], list):
                 print(f"Terms is not a list: {type(result['terms'])}", flush=True)
-                if attempt < len(prompts):
+                if attempt < 3:
                     continue
                 return {"terms": []}
             
@@ -217,13 +218,13 @@ def detect_terms(text: str, source_language: str = 'hi') -> dict:
                 return result
             else:
                 print(f"No valid terms found on attempt {attempt}, trying next strategy...", flush=True)
-                if attempt < len(prompts):
+                if attempt < 3:
                     continue
         
         except Exception as e:
             import traceback
             print(f"Error on attempt {attempt}: {e}", flush=True)
-            if attempt < len(prompts):
+            if attempt < 3:
                 continue
             print(f"Traceback: {traceback.format_exc()}", flush=True)
     

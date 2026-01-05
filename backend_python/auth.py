@@ -15,7 +15,33 @@ load_dotenv(dotenv_path=env_path)
 #load from current directory as fallback
 load_dotenv()
 
-HASH_ALGORITHM = os.environ.get("HASH_ALGORITHM")
+HASH_ALGORITHM = os.environ.get("HASH_ALGORITHM", "pbkdf2_sha256")
+
+def create_users_table():
+    """
+    Create the users table if it doesn't exist.
+    Run this once to set up the database schema.
+    """
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS users (
+                        id SERIAL PRIMARY KEY,
+                        username VARCHAR(255) UNIQUE NOT NULL,
+                        email VARCHAR(255),
+                        password_hash VARCHAR(255) NOT NULL,
+                        created_at TIMESTAMP DEFAULT NOW(),
+                        updated_at TIMESTAMP DEFAULT NOW()
+                    );
+                    
+                    CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
+                    CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+                """)
+                print("Users table created/verified successfully", flush=True)
+    except Exception as e:
+        print(f"Error creating users table: {e}", flush=True)
+        raise
 
 def hash_password(password, salt=None, iterations=310000):
     if salt is None:
@@ -63,7 +89,7 @@ def login():
                 session["user_id"] = row["id"]
                 return redirect(url_for("index"))
             else:
-                return render_template("login.html", error_login=True)
+                return render_template("login.html", error_login=True, form=request.form)
 
 @auth_blueprint.route("/register", methods=["POST"])
 def register():
@@ -82,6 +108,7 @@ def register():
 
     with get_db() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            # Check if username already exists
             cursor.execute(
                 "SELECT * FROM users WHERE username = %s", (username,)
             )
@@ -90,15 +117,28 @@ def register():
                 return render_template(
                     "register.html", error_unique=True, form=request.form
                 )
+            
+            # Check if email already exists
+            if email:
+                cursor.execute(
+                    "SELECT * FROM users WHERE email = %s", (email,)
+                )
+                res = cursor.fetchall()
+                if len(res) != 0:
+                    return render_template(
+                        "register.html", error_email_exists=True, form=request.form
+                    )
 
             password_hash = hash_password(password)
             cursor.execute(
-                "INSERT INTO users (username, email, password_hash) VALUES (%s, %s, %s)",
+                "INSERT INTO users (username, email, password_hash) VALUES (%s, %s, %s) RETURNING id",
                 (username, email, password_hash),
             )
-        conn.commit()
+            new_user = cursor.fetchone()
+            # Auto-login after registration
+            session["user_id"] = new_user["id"]
 
-    return redirect(url_for("login_form"))
+    return redirect(url_for("index"))
 @auth_blueprint.route("/logout")
 def logout():
     session.pop("user_id", None)

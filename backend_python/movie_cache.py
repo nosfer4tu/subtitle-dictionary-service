@@ -33,7 +33,7 @@ def get_cached_movie(movie_id: int = None, video_id: str = None):
                         SELECT 
                             movie_id, youtube_video_id, source_transcription, 
                             japanese_translation, detected_terms, language, 
-                            segments, created_at, updated_at
+                            segments, pipeline_version, created_at, updated_at
                         FROM movie_cache
                         WHERE movie_id = %s AND youtube_video_id = %s
                         ORDER BY updated_at DESC
@@ -47,7 +47,7 @@ def get_cached_movie(movie_id: int = None, video_id: str = None):
                         SELECT 
                             movie_id, youtube_video_id, source_transcription, 
                             japanese_translation, detected_terms, language, 
-                            segments, created_at, updated_at
+                            segments, pipeline_version, created_at, updated_at
                         FROM movie_cache
                         WHERE movie_id = %s
                         ORDER BY updated_at DESC
@@ -61,7 +61,7 @@ def get_cached_movie(movie_id: int = None, video_id: str = None):
                         SELECT 
                             movie_id, youtube_video_id, source_transcription, 
                             japanese_translation, detected_terms, language, 
-                            segments, created_at, updated_at
+                            segments, pipeline_version, created_at, updated_at
                         FROM movie_cache
                         WHERE youtube_video_id = %s
                         ORDER BY updated_at DESC
@@ -94,8 +94,9 @@ def get_cached_movie(movie_id: int = None, video_id: str = None):
                         'detected_terms': detected_terms,
                         'language': row[5],
                         'segments': json.loads(row[6]) if row[6] else None,
-                        'created_at': row[7],
-                        'updated_at': row[8],
+                        'pipeline_version': row[7] if row[7] is not None else 1,  # Default to 1 for old cache entries
+                        'created_at': row[8],
+                        'updated_at': row[9],
                         'cached_video_path': cached_video_path if os.path.exists(cached_video_path) else None
                     }
                 return None
@@ -121,7 +122,8 @@ def save_cached_movie(
     detected_terms: dict = None,
     language: str = None,
     segments: list = None,
-    processed_video_path: str = None
+    processed_video_path: str = None,
+    pipeline_version: int = 1
 ):
     """
     Save processed movie data to cache.
@@ -160,6 +162,7 @@ def save_cached_movie(
                             detected_terms = %s,
                             language = %s,
                             segments = %s,
+                            pipeline_version = %s,
                             updated_at = NOW()
                         WHERE movie_id = %s AND youtube_video_id = %s
                         """,
@@ -169,19 +172,20 @@ def save_cached_movie(
                             detected_terms_json,
                             language,
                             segments_json,
+                            pipeline_version,
                             movie_id,
                             video_id
                         )
                     )
-                    print(f"Updated cached movie: movie_id={movie_id}, video_id={video_id}", flush=True)
+                    print(f"Updated cached movie: movie_id={movie_id}, video_id={video_id}, pipeline_version={pipeline_version}", flush=True)
                 else:
                     # Insert new entry
                     cursor.execute(
                         """
                         INSERT INTO movie_cache 
                         (movie_id, youtube_video_id, source_transcription, japanese_translation, 
-                         detected_terms, language, segments, created_at, updated_at)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
+                         detected_terms, language, segments, pipeline_version, created_at, updated_at)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
                         """,
                         (
                             movie_id,
@@ -190,10 +194,11 @@ def save_cached_movie(
                             japanese_translation,
                             detected_terms_json,
                             language,
-                            segments_json
+                            segments_json,
+                            pipeline_version
                         )
                     )
-                    print(f"Cached new movie: movie_id={movie_id}, video_id={video_id}", flush=True)
+                    print(f"Cached new movie: movie_id={movie_id}, video_id={video_id}, pipeline_version={pipeline_version}", flush=True)
                 
                 conn.commit()
                 
@@ -267,6 +272,7 @@ def create_movie_cache_table():
                         detected_terms JSONB,
                         language VARCHAR(10),
                         segments JSONB,
+                        pipeline_version INTEGER DEFAULT 1,
                         created_at TIMESTAMP DEFAULT NOW(),
                         updated_at TIMESTAMP DEFAULT NOW(),
                         UNIQUE(movie_id, youtube_video_id)
@@ -275,6 +281,16 @@ def create_movie_cache_table():
                     CREATE INDEX IF NOT EXISTS idx_movie_cache_movie_id ON movie_cache(movie_id);
                     CREATE INDEX IF NOT EXISTS idx_movie_cache_video_id ON movie_cache(youtube_video_id);
                 """)
+                
+                # Add pipeline_version column if it doesn't exist (for existing tables)
+                try:
+                    cursor.execute("""
+                        ALTER TABLE movie_cache 
+                        ADD COLUMN IF NOT EXISTS pipeline_version INTEGER DEFAULT 1
+                    """)
+                except Exception as e:
+                    # Column might already exist, ignore
+                    pass
                 conn.commit()
                 print("Movie cache table created/verified successfully", flush=True)
     except Exception as e:
