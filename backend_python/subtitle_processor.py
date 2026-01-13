@@ -6,6 +6,7 @@ from backend_python.whisper_transcribe import transcribe_audio, transcribe_audio
 from backend_python.detect_terms import detect_terms
 import re
 import unicodedata
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 def verify_video_file(video_path: str) -> bool:
     """Verify that a video file is valid and not corrupted"""
@@ -678,15 +679,17 @@ def process_trailer_video(video_path: str, output_path: str, language: str = Non
         if not source_segments:
             raise ValueError("No segments transcribed")
         
-        # Step 2.5: Per-segment cleanup and translation for perfect timing
+        # Step 2.5: Per-segment cleanup and translation for perfect timing (OPTIMIZED: Parallel)
         from backend_python.translate import cleanup_english_transcription, translate_english_to_japanese
         from backend_python.detect_terms import detect_terms
 
         subtitle_segments = []
         cleaned_segments = []
         print("=" * 80, flush=True)
-        print("=== PER-SEGMENT TRANSLATION PIPELINE ===", flush=True)
+        print("=== PER-SEGMENT TRANSLATION PIPELINE (PARALLEL) ===", flush=True)
         
+        # Prepare segment data for parallel processing
+        segment_data = []
         for idx, seg in enumerate(source_segments):
             raw_text = seg.get('text', '') or ''
             start = seg.get('start', 0.0)
@@ -694,8 +697,23 @@ def process_trailer_video(video_path: str, output_path: str, language: str = Non
             duration = end - start
             
             cleaned_en = cleanup_english_transcription(raw_text) or ""
-            
+            segment_data.append({
+                'idx': idx,
+                'raw_text': raw_text,
+                'start': start,
+                'end': end,
+                'duration': duration,
+                'cleaned_en': cleaned_en
+            })
+            cleaned_segments.append(cleaned_en)
+        
+        # Parallel translation of segments
+        def translate_segment(seg_data):
+            """Helper function to translate a single segment"""
+            idx = seg_data['idx']
+            cleaned_en = seg_data['cleaned_en']
             jp_text = ""
+            
             if cleaned_en.strip():
                 try:
                     from backend_python.translate import translate_subtitle_segment
@@ -704,16 +722,59 @@ def process_trailer_video(video_path: str, output_path: str, language: str = Non
                     print(f"[SEG {idx}] Translation error: {e}", flush=True)
                     jp_text = ""
             
-            print(f"[SEG {idx}] duration={duration:.2f}s", flush=True)
-            print(f"[SEG {idx}] JP: {repr(jp_text[:120])}", flush=True)
+            return {
+                'idx': idx,
+                'jp_text': jp_text,
+                'seg_data': seg_data
+            }
+        
+        # Execute translations in parallel (max 10 concurrent to avoid API rate limits)
+        translated_results = [None] * len(segment_data)
+        max_workers = min(10, len(segment_data))  # Limit concurrent API calls
+        
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all translation tasks
+            future_to_seg = {executor.submit(translate_segment, seg_data): seg_data for seg_data in segment_data}
             
-            cleaned_segments.append(cleaned_en)
-            subtitle_segments.append({
-                'text': raw_text,
-                'start': start,
-                'end': end,
-                'japanese_text': jp_text,
-            })
+            # Collect results as they complete
+            for future in as_completed(future_to_seg):
+                try:
+                    result = future.result()
+                    translated_results[result['idx']] = result
+                    idx = result['idx']
+                    jp_text = result['jp_text']
+                    duration = result['seg_data']['duration']
+                    print(f"[SEG {idx}] duration={duration:.2f}s", flush=True)
+                    print(f"[SEG {idx}] JP: {repr(jp_text[:120])}", flush=True)
+                except Exception as e:
+                    seg_data = future_to_seg[future]
+                    print(f"[SEG {seg_data['idx']}] Unexpected error: {e}", flush=True)
+                    # Create a fallback result
+                    translated_results[seg_data['idx']] = {
+                        'idx': seg_data['idx'],
+                        'jp_text': '',
+                        'seg_data': seg_data
+                    }
+        
+        # Build subtitle_segments in order (ensuring all segments are included)
+        for idx, result in enumerate(translated_results):
+            if result is None:
+                # Fallback: create empty entry if translation completely failed
+                seg_data = segment_data[idx]
+                subtitle_segments.append({
+                    'text': seg_data['raw_text'],
+                    'start': seg_data['start'],
+                    'end': seg_data['end'],
+                    'japanese_text': '',
+                })
+            else:
+                seg_data = result['seg_data']
+                subtitle_segments.append({
+                    'text': seg_data['raw_text'],
+                    'start': seg_data['start'],
+                    'end': seg_data['end'],
+                    'japanese_text': result['jp_text'],
+                })
         
         print("=" * 80, flush=True)
         
