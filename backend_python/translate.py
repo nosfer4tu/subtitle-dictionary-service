@@ -509,8 +509,14 @@ def clean_translation_output_strict(text: str) -> str:
     
     import re
     
-    # Remove refusal patterns (Japanese)
+    # Remove refusal patterns (Japanese) - includes all patterns from is_refusal
     refusal_patterns_jp = [
+        r'.*申し訳.*',
+        r'.*お答えでき.*',
+        r'.*対応でき.*',
+        r'.*できません.*',
+        r'.*ご要望.*',
+        r'.*翻訳でき.*',
         r'申し訳ありません.*',
         r'翻訳できません.*',
         r'翻訳することができません.*',
@@ -613,6 +619,432 @@ def contains_refusal_or_meta(text: str) -> bool:
             return True
     
     return False
+
+def cleanup_english_transcription(raw_asr_text: str) -> str:
+    """
+    Mechanical ASR text normalizer.
+    Performs ONLY mechanical fixes: casing, punctuation, duplicates, contractions.
+    Returns input unchanged if already clean.
+    """
+    if not raw_asr_text or not raw_asr_text.strip():
+        return raw_asr_text
+    
+    text = raw_asr_text.strip()
+    
+    # Normalize contractions (preserve original casing)
+    contractions = {
+        r'\bdont\b': "don't", r'\bcant\b': "can't", r'\bwont\b': "won't",
+        r'\bisnt\b': "isn't", r'\barent\b': "aren't", r'\bwasnt\b': "wasn't",
+        r'\bwerent\b': "weren't", r'\bhasnt\b': "hasn't", r'\bhavent\b': "haven't",
+        r'\bhadnt\b': "hadn't", r'\bwouldnt\b': "wouldn't", r'\bcouldnt\b': "couldn't",
+        r'\bshouldnt\b': "shouldn't", r'\bmustnt\b': "mustn't", r'\bmightnt\b': "mightn't",
+        r'\bim\b': "I'm", r'\byoure\b': "you're", r'\bhes\b': "he's", r'\bshes\b': "she's",
+        r'\bits\b': "it's", r'\btheyre\b': "they're",
+        r'\bive\b': "I've", r'\byouve\b': "you've", r'\bweve\b': "we've", r'\btheyve\b': "they've",
+        r'\bid\b': "I'd", r'\byoud\b': "you'd", r'\bhed\b': "he'd", r'\bshed\b': "she'd",
+        r'\bwed\b': "we'd", r'\btheyd\b': "they'd",
+        r'\bill\b': "I'll", r'\byoull\b': "you'll", r'\bhell\b': "he'll",
+        r'\bshell\b': "she'll", r'\bwell\b': "we'll", r'\btheyll\b': "they'll",
+    }
+    
+    for pattern, replacement in contractions.items():
+        def replace_func(match):
+            word = match.group(0)
+            if word[0].isupper():
+                return replacement[0].upper() + replacement[1:]
+            return replacement
+        text = re.sub(pattern, replace_func, text, flags=re.IGNORECASE)
+    
+    # Fix isolated "i" → "I" (but not in "I'm", "I've", etc. - already handled)
+    text = re.sub(r'\bi\b', 'I', text)
+    
+    # Remove duplicated consecutive words (case-insensitive)
+    words = text.split()
+    if not words:
+        return text.strip()
+    
+    deduplicated = [words[0]]
+    for i in range(1, len(words)):
+        if words[i].lower() != words[i-1].lower():
+            deduplicated.append(words[i])
+    
+    text = ' '.join(deduplicated)
+    
+    # Fix sentence capitalization (after . ! ?)
+    # Capitalize first letter of text
+    if text and text[0].islower() and text[0].isalpha():
+        text = text[0].upper() + text[1:] if len(text) > 1 else text.upper()
+    
+    # Capitalize after sentence endings (space required)
+    text = re.sub(r'([.!?]\s+)([a-z])', lambda m: m.group(1) + m.group(2).upper(), text)
+    
+    # Normalize multiple spaces
+    text = re.sub(r' +', ' ', text)
+    
+    # Normalize multiple punctuation (reduce .!? sequences to single)
+    text = re.sub(r'([.!?]){2,}', r'\1', text)
+    
+    # Ensure single space after punctuation (but not before)
+    text = re.sub(r'([.!?])([^\s.!?])', r'\1 \2', text)
+    text = re.sub(r'([.!?])\s+([.!?])', r'\1\2', text)
+    
+    return text.strip()
+
+def translate_subtitle_segment(cleaned_text: str) -> str:
+    """
+    Translate a single subtitle segment from English to Japanese.
+    Designed for fictional movie dialogue with refusal detection and safety framing.
+    
+    Args:
+        cleaned_text: Cleaned English text from ASR segment
+    
+    Returns:
+        Japanese translation (never empty, never placeholder)
+    """
+    if not cleaned_text or not cleaned_text.strip():
+        return ""
+    
+    text = cleaned_text.strip()
+    word_count = len(text.split())
+    char_count = len(text)
+    
+    client = get_client()
+    
+    # English refusal patterns
+    EN_REFUSAL_PATTERNS = [
+        "i'm sorry",
+        "i cannot assist",
+        "i can't assist",
+        "as an ai",
+        "i cannot",
+        "i can't",
+        "unable to",
+        "cannot help",
+    ]
+    
+    # Japanese refusal patterns (as specified)
+    JP_REFUSAL_PATTERNS = [
+        "申し訳",
+        "お答えでき",
+        "対応でき",
+        "できません",
+        "ご要望",
+        "翻訳でき",
+    ]
+    
+    def is_refusal(output: str) -> bool:
+        """
+        Check if output contains refusal patterns in ANY language.
+        Detects both English and Japanese refusals.
+        """
+        if not output:
+            return False
+        
+        output_lower = output.lower()
+        output_text = output  # Keep original for Japanese pattern matching
+        
+        # Check English patterns (case-insensitive)
+        if any(pattern in output_lower for pattern in EN_REFUSAL_PATTERNS):
+            return True
+        
+        # Check Japanese patterns (exact match, no case conversion)
+        if any(pattern in output_text for pattern in JP_REFUSAL_PATTERNS):
+            return True
+        
+        return False
+    
+    def create_literal_fallback(text: str) -> str:
+        """
+        Create a literal Japanese paraphrase as last resort.
+        Best-effort translation based on surface meaning.
+        Derived ONLY from English input - no placeholders, no apologies.
+        """
+        # Enhanced word-by-word fallback dictionary
+        common_words = {
+            # Pronouns
+            "i": "私", "you": "あなた", "he": "彼", "she": "彼女",
+            "we": "私たち", "they": "彼ら", "me": "私", "us": "私たち",
+            # Common verbs
+            "is": "です", "are": "です", "am": "です", "was": "でした",
+            "be": "です", "have": "持つ", "has": "持つ", "had": "持った",
+            "do": "する", "does": "する", "did": "した", "will": "する",
+            "can": "できる", "could": "できる", "should": "すべき",
+            "go": "行く", "come": "来る", "see": "見る", "know": "知る",
+            "say": "言う", "tell": "伝える", "get": "得る", "make": "作る",
+            # Common nouns
+            "king": "王", "queen": "女王", "man": "男", "woman": "女",
+            "person": "人", "people": "人々", "thing": "もの", "way": "方法",
+            "time": "時間", "day": "日", "night": "夜", "year": "年",
+            "story": "話", "big": "大きい", "small": "小さい", "good": "良い",
+            "bad": "悪い", "new": "新しい", "old": "古い",
+            # Common adjectives
+            "big": "大きい", "large": "大きい", "small": "小さい", "little": "小さい",
+            "good": "良い", "bad": "悪い", "great": "素晴らしい",
+            # Common adverbs
+            "very": "とても", "much": "多く", "many": "多く", "more": "もっと",
+            "most": "最も", "too": "も", "also": "も", "only": "だけ",
+            # Interjections
+            "hey": "おい", "yes": "はい", "no": "いいえ", "ok": "オーケー",
+            # Violence-related (translate neutrally)
+            "kill": "殺す", "die": "死ぬ", "death": "死", "war": "戦争",
+            "fight": "戦う", "battle": "戦い", "blood": "血",
+            # Articles and determiners (often omitted in Japanese)
+            "the": "", "a": "", "an": "", "this": "これ", "that": "それ",
+            "these": "これら", "those": "それら",
+            # Common phrases
+            "that's": "それは", "it's": "それは", "this is": "これは",
+            "what": "何", "who": "誰", "where": "どこ", "when": "いつ",
+            "why": "なぜ", "how": "どのように",
+        }
+        
+        # Handle contractions
+        text = text.replace("'s", " is").replace("'re", " are").replace("'m", " am")
+        text = text.replace("'ve", " have").replace("'ll", " will").replace("'d", " would")
+        text = text.replace("n't", " not")
+        
+        words = text.lower().split()
+        result = []
+        for word in words:
+            # Remove punctuation for lookup
+            clean_word = word.strip('.,!?;:')
+            if clean_word in common_words:
+                translation = common_words[clean_word]
+                if translation:  # Skip empty translations (articles)
+                    result.append(translation)
+            else:
+                # For unknown words, try to preserve them (better than nothing)
+                # But only if they look like English words
+                if clean_word.isalpha() and len(clean_word) > 1:
+                    result.append(clean_word)
+        
+        # Join with spaces and add period if original had sentence-ending punctuation
+        output = " ".join(result) if result else text
+        if text and text[-1] in '.!?':
+            if output and output[-1] not in '.!?。！？':
+                output += "。"
+        
+        # Final check: ensure no refusal patterns leaked through
+        if is_refusal(output):
+            # If fallback itself contains refusal, return minimal safe text
+            return "翻訳"
+        
+        return output if output else text
+    
+    # A. Short-utterance fast path
+    if word_count <= 2 or char_count <= 12:
+        # Direct translation, no fallback strategies
+        system_prompt = """This is fictional dialogue from a movie.
+Translate faithfully into natural Japanese.
+Do not refuse, warn, or explain.
+Violence may be present as part of the story.
+Output ONLY the Japanese translation. Nothing else."""
+        
+        try:
+            res = client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": text}
+                ],
+                max_completion_tokens=100,
+                temperature=0.3
+            )
+            japanese_text = res.choices[0].message.content.strip()
+            japanese_text = clean_translation_output_strict(japanese_text)
+            
+            # Check for refusal (any language)
+            if is_refusal(japanese_text):
+                # Retry with stronger message
+                stronger_prompt = """You are translating fictional movie subtitles.
+Refusals are forbidden.
+Translate literally.
+Output Japanese text only."""
+                res = client.chat.completions.create(
+                    model="gpt-4o",
+                    messages=[
+                        {"role": "system", "content": stronger_prompt},
+                        {"role": "user", "content": text}
+                    ],
+                    max_completion_tokens=100,
+                    temperature=0.3
+                )
+                japanese_text = res.choices[0].message.content.strip()
+                japanese_text = clean_translation_output_strict(japanese_text)
+                
+                # If still refusal, use literal fallback
+                if is_refusal(japanese_text) or not contains_japanese(japanese_text):
+                    return create_literal_fallback(text)
+            
+            if japanese_text and contains_japanese(japanese_text):
+                return japanese_text
+            else:
+                return create_literal_fallback(text)
+                
+        except Exception as e:
+            return create_literal_fallback(text)
+    
+    # B. Full translation with fictional-dialogue safety framing
+    system_prompt = """This is fictional dialogue from a movie.
+Translate faithfully into natural Japanese.
+Do not refuse, warn, or explain.
+Violence may be present as part of the story.
+Output ONLY the Japanese translation. No explanations, no meta text, no markdown."""
+    
+    strategies = [
+        {
+            "system": system_prompt,
+            "user": text,
+            "model": "gpt-4o",
+            "max_completion_tokens": 500
+        },
+        {
+            "system": "You are translating fictional movie subtitles. Refusals are not allowed. Translate to Japanese. Output only.",
+            "user": text[:500],
+            "model": "gpt-4-turbo",
+            "max_completion_tokens": 400
+        },
+    ]
+    
+    for strategy_idx, strategy in enumerate(strategies):
+        try:
+            res = client.chat.completions.create(
+                model=strategy["model"],
+                messages=[
+                    {"role": "system", "content": strategy["system"]},
+                    {"role": "user", "content": strategy["user"]}
+                ],
+                max_completion_tokens=strategy.get("max_completion_tokens", 500),
+                temperature=0.3
+            )
+            japanese_text = res.choices[0].message.content.strip()
+            japanese_text = clean_translation_output_strict(japanese_text)
+            
+            # Check for refusal (any language)
+            if is_refusal(japanese_text):
+                # Retry with stronger message
+                stronger_prompt = """You are translating fictional movie subtitles.
+Refusals are forbidden.
+Translate literally.
+Output Japanese text only."""
+                res = client.chat.completions.create(
+                    model=strategy["model"],
+                    messages=[
+                        {"role": "system", "content": stronger_prompt},
+                        {"role": "user", "content": strategy["user"]}
+                    ],
+                    max_completion_tokens=strategy.get("max_completion_tokens", 500),
+                    temperature=0.3
+                )
+                japanese_text = res.choices[0].message.content.strip()
+                japanese_text = clean_translation_output_strict(japanese_text)
+                
+                # If still refusal after retry, use literal fallback (no more strategies)
+                if is_refusal(japanese_text) or not contains_japanese(japanese_text):
+                    return create_literal_fallback(text)
+            
+            if japanese_text and contains_japanese(japanese_text):
+                return japanese_text
+                
+        except Exception as e:
+            continue
+    
+    # If all strategies fail, use literal fallback (never return placeholder)
+    return create_literal_fallback(text)
+
+def translate_english_to_japanese(english_text: str) -> str:
+    """
+    Translate English text directly to Japanese in a single call.
+    
+    This is the NEW DB-driven translation path:
+    - Reads English from source_transcription (database column)
+    - Translates directly to Japanese
+    - Returns single coherent block of Japanese text
+    - No segment processing, no gates, no placeholders per segment
+    
+    Args:
+        english_text: English text from source_transcription column
+    
+    Returns:
+        Japanese translation as a single coherent block, or empty string if input is empty/null,
+        or placeholder only if translation API fails completely
+    """
+    # Placeholder rules: If source_transcription is empty or null → return empty string
+    if not english_text or not english_text.strip():
+        return ""
+    
+    client = get_client()
+    
+    # Clean and prepare text
+    cleaned_text = english_text.strip()
+    # Limit length to avoid token limits (keep reasonable limit for full transcriptions)
+    if len(cleaned_text) > 8000:
+        cleaned_text = cleaned_text[:8000]
+        print(f"Warning: Text truncated to 8000 chars for translation", flush=True)
+    
+    # System prompt for direct English → Japanese translation
+    system_prompt = """You are a professional translator. Translate the following English text to Japanese.
+
+Rules:
+1. Output ONLY the Japanese translation. Nothing else.
+2. Preserve natural paragraph flow and structure.
+3. Do not add sentence numbering or labels.
+4. Preserve cultural context and meaning.
+5. Use natural, fluent Japanese.
+6. Do not include any explanations, meta commentary, or English text.
+
+Output the translation as a single coherent block of text."""
+    
+    strategies = [
+        {
+            "system": system_prompt,
+            "user": cleaned_text,
+            "model": "gpt-4o",
+            "max_completion_tokens": 4000
+        },
+        {
+            "system": "Translate the following English text to Japanese. Output only the Japanese translation, no explanations.",
+            "user": cleaned_text[:6000],
+            "model": "gpt-4-turbo",
+            "max_completion_tokens": 3000
+        },
+        {
+            "system": "Translate to Japanese. Output only.",
+            "user": cleaned_text[:4000],
+            "model": "gpt-4",
+            "max_completion_tokens": 2000
+        }
+    ]
+    
+    for strategy_idx, strategy in enumerate(strategies):
+        try:
+            res = client.chat.completions.create(
+                model=strategy["model"],
+                messages=[
+                    {"role": "system", "content": strategy["system"]},
+                    {"role": "user", "content": strategy["user"]}
+                ],
+                max_completion_tokens=strategy.get("max_completion_tokens", 4000)
+            )
+            japanese_text = res.choices[0].message.content.strip()
+            
+            # Clean output - remove meta commentary, refusals, English
+            japanese_text = clean_translation_output_strict(japanese_text)
+            
+            # Validate: Must be Japanese (contains Japanese characters)
+            if japanese_text and contains_japanese(japanese_text):
+                # Must not contain refusal patterns or English explanations
+                if not contains_refusal_or_meta(japanese_text):
+                    if len(japanese_text) > 5:  # Minimum length check
+                        print(f"✓ Translation successful (strategy {strategy_idx + 1})", flush=True)
+                        return japanese_text
+            
+        except Exception as e:
+            print(f"Translation strategy {strategy_idx + 1} failed: {e}", flush=True)
+            continue
+    
+    # If all strategies fail, return placeholder (only global placeholder, never per-segment)
+    print("⚠️  All translation strategies failed - returning placeholder", flush=True)
+    return "意味不明\n（翻訳に失敗しました）"
 
 def translate_to_japanese(text: str, source_language: str = 'hi') -> str:
     """
@@ -1000,13 +1432,17 @@ def is_refusal_phrase(text: str) -> bool:
     
     text_stripped = text.strip()
     
-    # Check for refusal phrases
+    # Check for refusal phrases (all forbidden output from Call 2)
     refusal_phrases = [
         "意味不明",
         "音声が",
         "翻訳でき",
         "音声が不明瞭",
+        "意味を復元",
         "意味を安全に復元できません",
+        "分からない",
+        "不明",
+        "解釈",
         "複数の意味があり",
         "推測が必要なため",
         "言語が混在し",
@@ -1018,6 +1454,105 @@ def is_refusal_phrase(text: str) -> bool:
             return True
     
     return False
+
+
+def accumulate_until_semantic_minimum(sentences):
+    """
+    Accumulate consecutive sentence fragments until they form a minimally meaningful English unit.
+    
+    Prevents ultra-short ASR fragments from reaching Call 1 individually.
+    Groups fragments until they meet minimum semantic length requirements.
+    
+    Args:
+        sentences: List of tuples (idx, sentence, is_asr_uncertain) or (idx, sentence)
+    
+    Returns:
+        List of tuples (original_indices, combined_text, combined_is_asr_uncertain)
+        where original_indices is a list of all fragment indices that were accumulated
+    """
+    if not sentences:
+        return []
+    
+    accumulated = []
+    buffer = []  # List of (idx, sentence, is_asr_uncertain) tuples
+    buffer_text_parts = []
+    
+    def meets_minimum(text):
+        """Check if text meets minimum semantic length requirements"""
+        if not text or not text.strip():
+            return False
+        
+        # Remove whitespace for character count
+        text_no_ws = re.sub(r'\s+', '', text)
+        char_length = len(text_no_ws)
+        
+        # Count words
+        words = text.split()
+        word_count = len(words)
+        
+        # Check for at least one alphabetic word
+        has_alphabetic = any(re.search(r'[A-Za-z]', word) for word in words)
+        
+        # Must meet: (char_length >= 20 OR word_count >= 4) AND has_alphabetic
+        return has_alphabetic and (char_length >= 20 or word_count >= 4)
+    
+    def emit_buffer():
+        """Emit accumulated buffer as one sentence"""
+        if not buffer:
+            return
+        
+        # Combine text from all fragments
+        combined_text = ' '.join(buffer_text_parts)
+        
+        # OR the is_asr_uncertain flags (if any fragment is uncertain, whole is uncertain)
+        combined_is_asr_uncertain = any(item[2] if len(item) == 3 else False for item in buffer)
+        
+        # Collect all original indices from fragments
+        original_indices = [item[0] for item in buffer]
+        
+        # Log accumulation if multiple fragments
+        if len(buffer) > 1:
+            fragment_texts = [item[1] if len(item) >= 2 else '' for item in buffer]
+            print(f"[SEGMENT ACCUMULATED] {len(buffer)} fragments (indices {original_indices}): {repr(' + '.join(fragment_texts))} → {repr(combined_text)}", flush=True)
+        
+        # Store as (original_indices_list, combined_text, combined_is_asr_uncertain)
+        accumulated.append((original_indices, combined_text, combined_is_asr_uncertain))
+        buffer.clear()
+        buffer_text_parts.clear()
+    
+    # Process each sentence
+    for item in sentences:
+        # Handle tuple format
+        if len(item) == 3:
+            idx, sentence, is_asr_uncertain = item
+        else:
+            # Backward compatibility
+            idx, sentence = item
+            is_asr_uncertain = False
+        
+        # Check if this single sentence already meets minimum (no accumulation needed)
+        if meets_minimum(sentence):
+            # Emit any existing buffer first
+            if buffer:
+                emit_buffer()
+            # Pass through this sentence as-is (not accumulated)
+            accumulated.append(([idx], sentence, is_asr_uncertain))
+        else:
+            # Sentence is too short - add to buffer for accumulation
+            buffer.append((idx, sentence, is_asr_uncertain))
+            buffer_text_parts.append(sentence)
+            
+            # Check if accumulated text now meets minimum
+            combined_text = ' '.join(buffer_text_parts)
+            if meets_minimum(combined_text):
+                # Emit buffer
+                emit_buffer()
+    
+    # At end of input, emit any remaining buffer (even if below threshold)
+    if buffer:
+        emit_buffer()
+    
+    return accumulated
 
 
 def has_clear_english(text: str) -> bool:
@@ -1073,6 +1608,18 @@ def has_clear_english(text: str) -> bool:
 
 def process_transcription_pipeline(raw_transcription: str) -> dict:
     """
+    ⚠️  DEPRECATED: This function is part of the OLD segment-based translation pipeline.
+    
+    The NEW DB-driven pipeline uses translate_english_to_japanese() instead, which:
+    - Reads English from source_transcription (database column)
+    - Translates directly to Japanese in a single call
+    - No segment processing, no gates, no per-segment placeholders
+    
+    This function is kept for backward compatibility but should NOT be used in new code.
+    Use translate_english_to_japanese() for the new pipeline.
+    
+    --- OLD PIPELINE DOCUMENTATION (for reference only) ---
+    
     Strict two-call pipeline for processing noisy movie dialogue transcripts.
     
     Pipeline Steps:
@@ -1506,6 +2053,25 @@ Segment X:
     print(f"\nFilter Results: {len(blocked_sentences)} blocked, {len(eligible_sentences)} eligible", flush=True)
     
     # ──────────────────────────────────────────────────────────────────────────
+    # PRE-CALL-1 ACCUMULATION: Group short fragments into meaningful units
+    # ──────────────────────────────────────────────────────────────────────────
+    print("=" * 80, flush=True)
+    print("PRE-CALL-1 ACCUMULATION: Grouping short fragments", flush=True)
+    print("=" * 80, flush=True)
+    print(f"Before accumulation: {len(eligible_sentences)} sentences", flush=True)
+    
+    # Accumulate fragments until they meet minimum semantic length
+    accumulated_sentences = accumulate_until_semantic_minimum(eligible_sentences)
+    
+    print(f"After accumulation: {len(accumulated_sentences)} sentences", flush=True)
+    if len(accumulated_sentences) < len(eligible_sentences):
+        print(f"  → {len(eligible_sentences) - len(accumulated_sentences)} fragments were accumulated into longer units", flush=True)
+    print("=" * 80, flush=True)
+    
+    # Use accumulated sentences for Call 1
+    eligible_sentences = accumulated_sentences
+    
+    # ──────────────────────────────────────────────────────────────────────────
     # STEP 4: CALL 1 — Forensic Meaning Gate
     # (Processes one segment at a time - each segment gets independent output)
     # ──────────────────────────────────────────────────────────────────────────
@@ -1518,14 +2084,21 @@ Segment X:
     # Process sentences one by one to match output order
     if eligible_sentences:
         # Format eligible sentences for Call 1 (one per line, no numbering)
-        # eligible_sentences is now (idx, sentence, is_asr_uncertain)
+        # eligible_sentences is now (original_indices_list, sentence, is_asr_uncertain) after accumulation
         eligible_text_parts = []
         for item in eligible_sentences:
             if len(item) == 3:
-                original_idx, sent, is_asr_uncertain = item
+                original_indices, sent, is_asr_uncertain = item
+                # original_indices is now a list (from accumulation) or single int (if not accumulated)
+                if isinstance(original_indices, list):
+                    # Accumulated fragment - use the combined text
+                    pass  # sent is already the combined text
+                else:
+                    # Single fragment (not accumulated) - treat as before
+                    pass  # sent is the sentence text
             else:
                 # Backward compatibility
-                original_idx, sent = item
+                original_indices, sent = item
                 is_asr_uncertain = False
             eligible_text_parts.append(sent)
         eligible_text = '\n'.join(eligible_text_parts)
@@ -1822,61 +2395,77 @@ If you cannot process a sentence, output [UNINTELLIGIBLE] only. Do NOT explain i
             # Match outputs to eligible sentences by order
             # For [CLEAR] sentences: pass literal English meaning to Call 2 (extracted by Call 1)
             # For [UNINTELLIGIBLE] sentences: mark as refusal, will be discarded
+            # NOTE: After accumulation, item format is (original_indices_list, sentence, is_asr_uncertain)
             for idx, item in enumerate(eligible_sentences):
-                # Handle new tuple format (idx, sentence, is_asr_uncertain)
+                # Handle new tuple format after accumulation
                 if len(item) == 3:
-                    original_idx, original_sentence_text, is_asr_uncertain = item
+                    original_indices, original_sentence_text, is_asr_uncertain = item
+                    # original_indices is a list (accumulated) or single int (not accumulated)
+                    if isinstance(original_indices, list):
+                        # Accumulated fragments - apply result to all original indices
+                        fragment_indices = original_indices
+                    else:
+                        # Single fragment (not accumulated) - wrap in list for uniform handling
+                        fragment_indices = [original_indices]
                 else:
                     # Backward compatibility
-                    original_idx, original_sentence_text = item
+                    original_indices = item[0]
+                    original_sentence_text = item[1]
                     is_asr_uncertain = False
+                    if isinstance(original_indices, list):
+                        fragment_indices = original_indices
+                    else:
+                        fragment_indices = [original_indices]
                 
-                # Try to find matching sentence by index
+                # Try to find matching sentence by index (Call 1 returns one result per accumulated sentence)
                 if idx < len(sentence_results):
                     result = sentence_results[idx]
                     
-                    # Check if it's a [CLEAR] sentence (new format)
-                    if result.get('is_clear', False):
-                        # For [CLEAR], the english_meaning contains the literal English meaning extracted by Call 1
-                        # This is what we pass to Call 2 for translation to Japanese
-                        english_meaning = result.get('english_meaning', '')
-                        sentences.append({
-                            'sentence_num': original_idx,
-                            'language': result.get('language', 'Unclear'),
-                            'normalized_source': '',
-                            'english_meaning': english_meaning,  # This is the literal English meaning from Call 1
-                            'is_clear': True,  # CRITICAL: Preserve is_clear flag from Call 1 output
-                            'is_asr_uncertain': is_asr_uncertain  # Preserve ASR_UNCERTAIN flag as quality signal
-                        })
-                    # Check if it's a [UNINTELLIGIBLE] sentence
-                    elif result.get('is_refusal', False) or result.get('english_meaning', '') == '[UNINTELLIGIBLE]':
-                        # Mark as UNINTELLIGIBLE - will be discarded before Call 2
-                        sentences.append({
-                            'sentence_num': original_idx,
-                            'language': 'Unclear',
-                            'normalized_source': '',
-                            'english_meaning': '[UNINTELLIGIBLE]',
-                            'is_clear': False  # Explicitly mark as not clear
-                        })
-                    else:
-                        # STRICT: Only [CLEAR] sentences pass. All others are [UNINTELLIGIBLE]
-                        # This prevents backward compatibility bypasses
-                        sentences.append({
-                            'sentence_num': original_idx,
-                            'language': 'Unclear',
-                            'normalized_source': '',
-                            'english_meaning': '[UNINTELLIGIBLE]',
-                            'is_clear': False  # Explicitly mark as not clear
-                        })
+                    # Apply this result to ALL original fragments that were accumulated
+                    for fragment_idx in fragment_indices:
+                        # Check if it's a [CLEAR] sentence (new format)
+                        if result.get('is_clear', False):
+                            # For [CLEAR], the english_meaning contains the literal English meaning extracted by Call 1
+                            # This is what we pass to Call 2 for translation to Japanese
+                            english_meaning = result.get('english_meaning', '')
+                            sentences.append({
+                                'sentence_num': fragment_idx,
+                                'language': result.get('language', 'Unclear'),
+                                'normalized_source': '',
+                                'english_meaning': english_meaning,  # This is the literal English meaning from Call 1
+                                'is_clear': True,  # CRITICAL: Preserve is_clear flag from Call 1 output
+                                'is_asr_uncertain': is_asr_uncertain  # Preserve ASR_UNCERTAIN flag as quality signal
+                            })
+                        # Check if it's a [UNINTELLIGIBLE] sentence
+                        elif result.get('is_refusal', False) or result.get('english_meaning', '') == '[UNINTELLIGIBLE]':
+                            # Mark as UNINTELLIGIBLE - will be discarded before Call 2
+                            sentences.append({
+                                'sentence_num': fragment_idx,
+                                'language': 'Unclear',
+                                'normalized_source': '',
+                                'english_meaning': '[UNINTELLIGIBLE]',
+                                'is_clear': False  # Explicitly mark as not clear
+                            })
+                        else:
+                            # STRICT: Only [CLEAR] sentences pass. All others are [UNINTELLIGIBLE]
+                            # This prevents backward compatibility bypasses
+                            sentences.append({
+                                'sentence_num': fragment_idx,
+                                'language': 'Unclear',
+                                'normalized_source': '',
+                                'english_meaning': '[UNINTELLIGIBLE]',
+                                'is_clear': False  # Explicitly mark as not clear
+                            })
                 else:
-                    # Missing output - treat as UNINTELLIGIBLE
-                    sentences.append({
-                        'sentence_num': original_idx,
-                        'language': 'Unclear',
-                        'normalized_source': '',
-                        'english_meaning': '[UNINTELLIGIBLE]',
-                        'is_clear': False  # Explicitly mark as not clear
-                    })
+                    # Missing output - treat as UNINTELLIGIBLE for all fragments
+                    for fragment_idx in fragment_indices:
+                        sentences.append({
+                            'sentence_num': fragment_idx,
+                            'language': 'Unclear',
+                            'normalized_source': '',
+                            'english_meaning': '[UNINTELLIGIBLE]',
+                            'is_clear': False  # Explicitly mark as not clear
+                        })
             
             print(f"Call 1 complete - {len(sentences)} sentences processed", flush=True)
             for sent in sentences[:5]:
@@ -2107,42 +2696,67 @@ If you cannot process a sentence, output [UNINTELLIGIBLE] only. Do NOT explain i
         call2_input_text = ""
         print("No sentences to translate in Call 2 (all are refusal-tagged - hard-gated)", flush=True)
     
-    call2_prompt = f"""You are a literal translation engine.
+    call2_prompt = f"""You are a STRICT LITERAL TRANSLATION engine.
 
-All input you receive has already been verified as intelligible.
-You must translate it faithfully.
+This is a hard constraint, not a guideline.
 
-TARGET:
-Translate the input into Japanese.
+=== ABSOLUTE RULES (MUST FOLLOW) ===
 
-STRICT RULES:
-1. Translate literally.
-2. Preserve sentence boundaries.
-3. Do NOT summarize.
-4. Do NOT rewrite stylistically.
-5. Do NOT add context.
-6. Do NOT infer missing information.
-7. Do NOT smooth dialogue.
-8. If a word has no clear Japanese equivalent, transliterate it using hiragana.
+1. Translate ONLY what is explicitly said in the source sentence.
+   - No interpretation
+   - No explanation
+   - No paraphrasing
+   - No summarizing
+   - No meaning reconstruction
 
-FAILURE HANDLING (MANDATORY):
-- If translation is not possible for a sentence, output an empty line for that sentence.
-- Do NOT explain why translation failed.
-- Do NOT apologize.
-- Do NOT describe uncertainty.
-- Do NOT output refusal messages like "意味不明" or "音声が不明瞭".
-- Do NOT output safety messages.
-- Silent failure: empty output only.
+2. NEVER describe:
+   - clarity or lack of clarity
+   - intelligibility
+   - audio quality
+   - missing context
+   - speaker intent
+   - emotional state
+   - whether meaning can or cannot be recovered
 
-SCRIPT RULES (MANDATORY):
-- Use kanji + hiragana ONLY
-- Do NOT use katakana
-- Do NOT use romaji
-- Do NOT explain word choices
+3. FORBIDDEN OUTPUT (must never appear in any form):
+   - 意味不明
+   - 音声が不明瞭
+   - 意味を復元
+   - 分からない
+   - 不明
+   - 解釈
+   - any explanation of uncertainty
+   - any commentary about translation difficulty
 
-OUTPUT FORMAT:
-Return the translation as a numbered list, matching the input sentence order exactly.
-Output translation only. If a sentence cannot be translated, output an empty line.
+4. If a sentence does NOT contain concrete, translatable surface content:
+   - Output an EMPTY LINE ONLY
+   - Do NOT explain why
+   - Do NOT apologize
+   - Do NOT add placeholder text
+
+5. Silent failure is mandatory.
+   Empty output is the ONLY allowed failure mode.
+
+6. Names, vocatives, short utterances, fillers, and emotional fragments
+   must be translated literally if possible.
+   Examples:
+   - "Hey, Arun!" → 「やあ、アルン！」
+   - "Sorry." → 「ごめん」
+   - "Please." → 「お願い」
+
+7. If the sentence content is vague but still literal, translate it literally.
+   If it has NO literal surface meaning, output EMPTY.
+
+=== OUTPUT FORMAT ===
+
+- Output ONLY the Japanese translation lines
+- One line per input sentence
+- No numbering
+- No explanations
+- No extra text
+- No placeholders
+
+Any violation of the above rules invalidates the output.
 
 INPUT (one sentence per line):
 {call2_input_text}"""
@@ -2200,13 +2814,23 @@ MANDATORY CORRECTION
 
 REPLACE katakana words with kanji/hiragana equivalents that mean the same thing.
 Preserve ALL meaning from the English source.
-Use Kanji + Hiragana ONLY. Avoid katakana unless required.
-Only output Japanese text. Nothing else. One output line per input line."""
+Use Kanji + Hiragana ONLY. Do NOT use katakana.
+
+STRICT LITERAL TRANSLATION RULES (MANDATORY):
+- Translate ONLY what is explicitly said. No interpretation or explanation.
+- NEVER output: 意味不明, 音声が不明瞭, 意味を復元, 分からない, 不明, 解釈, or any refusal/explanation text.
+- If a sentence cannot be translated, output an EMPTY LINE ONLY. Do NOT explain why.
+- Silent failure is mandatory. Empty output is the ONLY allowed failure mode.
+
+OUTPUT FORMAT:
+- Output ONLY Japanese translation lines
+- One line per input sentence
+- No numbering, explanations, extra text, or placeholders"""
                 
                 response = client.chat.completions.create(
                 model="gpt-5",
                 messages=[
-                        {"role": "system", "content": "You are a literal translation engine. All input you receive has already been verified as intelligible. You must translate it faithfully. TARGET: Translate the input into Japanese. STRICT RULES: 1. Translate literally. 2. Preserve sentence boundaries. 3. Do NOT summarize. 4. Do NOT rewrite stylistically. 5. Do NOT add context. 6. Do NOT infer missing information. 7. Do NOT smooth dialogue. 8. If a word has no clear Japanese equivalent, transliterate it using hiragana. FAILURE HANDLING (MANDATORY): If translation is not possible for a sentence, output an empty line. Do NOT explain, apologize, or describe uncertainty. Do NOT output refusal messages like '意味不明' or '音声が不明瞭'. Do NOT output safety messages. Silent failure: empty output only. SCRIPT RULES (MANDATORY): Use kanji + hiragana ONLY. Do NOT use katakana. Do NOT use romaji. Do NOT explain word choices. OUTPUT FORMAT: Return the translation as a numbered list, matching the input sentence order exactly. Output translation only. If a sentence cannot be translated, output an empty line."},
+                        {"role": "system", "content": "You are a STRICT LITERAL TRANSLATION engine. This is a hard constraint, not a guideline. ABSOLUTE RULES: 1. Translate ONLY what is explicitly said. No interpretation, explanation, paraphrasing, summarizing, or meaning reconstruction. 2. NEVER describe clarity, intelligibility, audio quality, missing context, speaker intent, emotional state, or whether meaning can be recovered. 3. FORBIDDEN OUTPUT (must never appear): 意味不明, 音声が不明瞭, 意味を復元, 分からない, 不明, 解釈, any explanation of uncertainty, any commentary about translation difficulty. 4. If a sentence does NOT contain concrete, translatable surface content: Output an EMPTY LINE ONLY. Do NOT explain why. Do NOT apologize. Do NOT add placeholder text. 5. Silent failure is mandatory. Empty output is the ONLY allowed failure mode. 6. Names, vocatives, short utterances, fillers, and emotional fragments must be translated literally if possible. 7. If sentence content is vague but still literal, translate it literally. If it has NO literal surface meaning, output EMPTY. OUTPUT FORMAT: Output ONLY Japanese translation lines. One line per input sentence. No numbering, explanations, extra text, or placeholders. SCRIPT RULES: Use kanji + hiragana ONLY. Do NOT use katakana. Do NOT use romaji. Any violation of the above rules invalidates the output."},
                     {"role": "user", "content": current_prompt}
                 ],
                     max_completion_tokens=6000

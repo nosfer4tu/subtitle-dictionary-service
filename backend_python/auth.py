@@ -87,7 +87,7 @@ def login():
 
             if verified:
                 session["user_id"] = row["id"]
-                return redirect(url_for("index"))
+                return redirect(url_for("app_index"))
             else:
                 return render_template("login.html", error_login=True, form=request.form)
 
@@ -135,8 +135,7 @@ def register():
                 (username, email, password_hash),
             )
             new_user = cursor.fetchone()
-            # Auto-login after registration
-            session["user_id"] = new_user["id"]
+            # Do NOT auto-login after registration
 
     return redirect(url_for("index"))
 @auth_blueprint.route("/logout")

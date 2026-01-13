@@ -3,7 +3,7 @@
     <head>
         <meta charset="UTF-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-        <title>Moviary - ホーム</title>
+        <title>IndoWakaru</title>
         <!-- <link
             rel="stylesheet"
             href="{{ url_for('static', filename='css/style.css') }}"
@@ -25,10 +25,14 @@
     <body>
         <div class="container">
             <div class="main-content">
+                <div style="margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center;">
+                    <a href="{{ url_for('dictionaries_list') }}" style="color: #667eea; text-decoration: none; font-weight: 500;">辞書一覧を見る</a>
+                    <a href="{{ url_for('auth.logout') }}" style="color: #666; text-decoration: none; font-size: 14px;">ログアウト</a>
+                </div>
                 <h2>映画を探す</h2>
                 <form
                     method="GET"
-                    action="{{ url_for('index') }}"
+                    action="{{ url_for('app_index') }}"
                     class="search-form"
                 >
                     <input

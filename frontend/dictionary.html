@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="ja">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>辞書 - {{ dictionary.title }}</title>
+        <style>
+            * {
+                margin: 0;
+                padding: 0;
+                box-sizing: border-box;
+            }
+            body {
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+                background: #f5f5f5;
+                padding: 20px;
+            }
+            .container {
+                max-width: 1000px;
+                margin: 0 auto;
+                background: white;
+                border-radius: 8px;
+                padding: 30px;
+                box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+            }
+            h1 {
+                color: #333;
+                margin-bottom: 10px;
+            }
+            .dictionary-info {
+                color: #666;
+                margin-bottom: 20px;
+                padding-bottom: 20px;
+                border-bottom: 1px solid #e0e0e0;
+            }
+            .controls {
+                margin-bottom: 20px;
+                display: flex;
+                gap: 10px;
+                align-items: center;
+            }
+            .btn {
+                padding: 8px 16px;
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                color: white;
+                border: none;
+                border-radius: 4px;
+                font-size: 14px;
+                cursor: pointer;
+                text-decoration: none;
+                display: inline-block;
+            }
+            .btn:hover {
+                opacity: 0.9;
+            }
+            .btn-secondary {
+                background: #6c757d;
+            }
+            .btn-favorite {
+                background: #ffc107;
+                color: #333;
+                font-size: 12px;
+                padding: 6px 12px;
+            }
+            .btn-favorite:hover {
+                background: #ffb300;
+            }
+            .btn-favorited {
+                background: #28a745;
+                color: white;
+            }
+            .btn-favorited:hover {
+                background: #218838;
+            }
+            .words-list {
+                display: grid;
+                gap: 15px;
+            }
+            .word-item {
+                border: 1px solid #e0e0e0;
+                border-radius: 6px;
+                padding: 15px;
+                background: #fafafa;
+            }
+            .word-header {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                margin-bottom: 10px;
+            }
+            .word-title {
+                font-size: 18px;
+                font-weight: 600;
+                color: #333;
+            }
+            .word-pronunciation {
+                color: #666;
+                font-style: italic;
+                margin: 5px 0;
+            }
+            .word-meaning {
+                color: #333;
+                margin: 5px 0;
+            }
+            .word-importance {
+                color: #666;
+                font-size: 14px;
+                margin-top: 10px;
+                padding-top: 10px;
+                border-top: 1px solid #e0e0e0;
+            }
+            .no-words {
+                text-align: center;
+                color: #666;
+                padding: 40px;
+            }
+            .back-link {
+                margin-bottom: 20px;
+            }
+            .back-link a {
+                color: #667eea;
+                text-decoration: none;
+            }
+            .back-link a:hover {
+                text-decoration: underline;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="back-link">
+                <a href="{{ url_for('dictionaries_list') }}">← 辞書一覧に戻る</a>
+            </div>
+            <h1>{{ dictionary.title }}</h1>
+            <div class="dictionary-info">
+                <p>YouTube Video ID: {{ dictionary.youtube_video_id }}</p>
+            </div>
+            <div class="controls">
+                <a href="{{ url_for('dictionary_detail', dictionary_id=dictionary.id) }}" class="btn btn-secondary">
+                    すべて表示
+                </a>
+                <a href="{{ url_for('dictionary_detail', dictionary_id=dictionary.id, favorites_only=1) }}" class="btn">
+                    お気に入りのみ
+                </a>
+            </div>
+            {% if words %}
+            <div class="words-list">
+                {% for word in words %}
+                <div class="word-item">
+                    <div class="word-header">
+                        <div class="word-title">{{ word.word }}</div>
+                        <button 
+                            class="btn btn-favorite {% if word.is_favorited %}btn-favorited{% endif %}"
+                            data-word-id="{{ word.id }}"
+                            onclick="toggleFavorite({{ word.id }}, this)"
+                        >
+                            {% if word.is_favorited %}★ お気に入りから削除{% else %}☆ お気に入りに追加{% endif %}
+                        </button>
+                    </div>
+                    {% if word.pronunciation_japanese %}
+                    <div class="word-pronunciation">発音: {{ word.pronunciation_japanese }}</div>
+                    {% endif %}
+                    {% if word.meaning_japanese %}
+                    <div class="word-meaning">意味: {{ word.meaning_japanese }}</div>
+                    {% endif %}
+                    {% if word.why_important %}
+                    <div class="word-importance">重要性: {{ word.why_important }}</div>
+                    {% endif %}
+                </div>
+                {% endfor %}
+            </div>
+            {% else %}
+            <div class="no-words">
+                {% if show_favorites_only %}
+                <p>お気に入りの単語がありません。</p>
+                {% else %}
+                <p>この辞書には単語が登録されていません。</p>
+                {% endif %}
+            </div>
+            {% endif %}
+        </div>
+        <script>
+            function toggleFavorite(wordId, button) {
+                const isFavorited = button.classList.contains('btn-favorited');
+                const url = isFavorited ? '/api/unfavorite' : '/api/favorite';
+                
+                fetch(url, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ word_id: wordId })
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        if (isFavorited) {
+                            button.classList.remove('btn-favorited');
+                            button.textContent = '☆ お気に入りに追加';
+                        } else {
+                            button.classList.add('btn-favorited');
+                            button.textContent = '★ お気に入りから削除';
+                        }
+                    } else {
+                        alert('エラー: ' + (data.error || '操作に失敗しました'));
+                    }
+                })
+                .catch(error => {
+                    console.error('Error:', error);
+                    alert('エラーが発生しました');
+                });
+            }
+        </script>
+    </body>
+</html>

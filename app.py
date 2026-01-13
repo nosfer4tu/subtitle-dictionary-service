@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, render_template, redirect, url_for, session
+from flask import Flask, request, jsonify, render_template, redirect, url_for, session, abort
 import requests
 from psycopg2.extras import RealDictCursor
 import os
@@ -9,7 +9,8 @@ from backend_python.auth import auth_blueprint, create_users_table
 from backend_python.tmdb import search_movies, fetch_indian_movies, get_movie_trailer, get_movie_details
 from backend_python.youtube_upload import download_video, extract_video_id
 from backend_python.subtitle_processor import process_trailer_video
-from backend_python.dictionary import add_dictionary_entry, update_dictionary_transcription
+from backend_python.dictionary import add_dictionary_entry, update_dictionary_transcription, save_words_to_dictionary
+from database.connection import get_db
 from backend_python.movie_cache import (
     get_cached_movie, save_cached_movie, 
     get_cached_raw_video, save_cached_raw_video,
@@ -44,14 +45,40 @@ except Exception as e:
 
 @app.route('/')
 def index():
-    # if "user_id" not in session:
-    #     return redirect(url_for("login"))
+    """Top page with project explanation and auth buttons"""
+    user_id = session.get('user_id')
+    return render_template("top.html", user_id=user_id)
+
+@app.route('/app')
+def app_index():
+    """Movie search page - requires authentication"""
+    if "user_id" not in session:
+        return redirect(url_for("auth.login_form"))
     
-    
+    # Ignore indian_page parameter (only page 1 is allowed)
+    if request.args.get("indian_page") and request.args.get("indian_page") != "1":
+        # Redirect to remove the indian_page parameter if it's not 1
         query = request.args.get("query")
-        movies = search_movies(query) if query else []
-        indian_movies = fetch_indian_movies()
-        return render_template("index.html", movies=movies, query=query or "", indian_movies=indian_movies)
+        if query:
+            return redirect(url_for("app_index", query=query))
+        else:
+            return redirect(url_for("app_index"))
+    
+    query = request.args.get("query")
+    movies = search_movies(query) if query else []
+    
+    # Only show page 1 (40 entries limit)
+    indian_movies_data = fetch_indian_movies(page=1, movies_per_page=40)
+    
+    return render_template(
+        "index.html", 
+        movies=movies, 
+        query=query or "", 
+        indian_movies=indian_movies_data["movies"],
+        indian_current_page=indian_movies_data["current_page"],
+        indian_total_pages=indian_movies_data["total_pages"],
+        indian_has_next=indian_movies_data["has_next"]
+    )
 
 @app.route('/movie/<int:movie_id>')
 def movie_detail(movie_id):
@@ -142,6 +169,35 @@ def upload_trailer():
                         output_video = tmp_file.name
                     shutil.copy2(cached_video_path, output_video)
                     print(f"Using cached processed video: {cached_video_path}", flush=True)
+                
+                # Save to dictionary and words if not already saved (for cached data)
+                try:
+                    # Check if dictionary exists for this user and video_id
+                    with get_db() as conn:
+                        with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                            cursor.execute(
+                                "SELECT id FROM dictionaries WHERE user_id = %s AND youtube_video_id = %s",
+                                (user_id, video_id)
+                            )
+                            existing_dict = cursor.fetchone()
+                            
+                            if not existing_dict:
+                                # Create dictionary entry if it doesn't exist
+                                dict_id = add_dictionary_entry(user_id, video_id, movie_title)
+                                update_dictionary_transcription(
+                                    dict_id,
+                                    cached_data['source_transcription'],
+                                    cached_data['japanese_translation']
+                                )
+                                # Save words from detected_terms
+                                if cached_data.get('detected_terms'):
+                                    save_words_to_dictionary(dict_id, cached_data['detected_terms'])
+                            else:
+                                # Dictionary exists, just ensure words are saved
+                                if cached_data.get('detected_terms'):
+                                    save_words_to_dictionary(existing_dict['id'], cached_data['detected_terms'])
+                except Exception as db_error:
+                    print(f"Database error (non-critical): {db_error}", flush=True)
                 
                 return jsonify({
                     'success': True,
@@ -244,12 +300,33 @@ def upload_trailer():
         
         # Save to dictionary (existing functionality)
         try:
-            dict_id = add_dictionary_entry(user_id, video_id, movie_title)
-            update_dictionary_transcription(
-                dict_id,
-                result['source_transcription'],
-                result['japanese_translation']
-            )
+            # Check if dictionary already exists for this user and video_id
+            with get_db() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                    cursor.execute(
+                        "SELECT id FROM dictionaries WHERE user_id = %s AND youtube_video_id = %s",
+                        (user_id, video_id)
+                    )
+                    existing_dict = cursor.fetchone()
+                    
+                    if existing_dict:
+                        dict_id = existing_dict['id']
+                        update_dictionary_transcription(
+                            dict_id,
+                            result['source_transcription'],
+                            result['japanese_translation']
+                        )
+                    else:
+                        dict_id = add_dictionary_entry(user_id, video_id, movie_title)
+                        update_dictionary_transcription(
+                            dict_id,
+                            result['source_transcription'],
+                            result['japanese_translation']
+                        )
+            
+            # Save detected terms as words
+            if result.get('detected_terms'):
+                save_words_to_dictionary(dict_id, result['detected_terms'])
         except Exception as db_error:
             print(f"Database error (non-critical): {db_error}", flush=True)
         
@@ -286,6 +363,171 @@ def upload_trailer():
         error_trace = traceback.format_exc()
         print(f"Processing error: {error_trace}", flush=True)
         return jsonify({'error': f'Failed to process trailer: {str(e)}'}), 500
+
+@app.route('/dictionary/<int:dictionary_id>')
+def dictionary_detail(dictionary_id):
+    """Display dictionary with words - requires authentication and ownership"""
+    if "user_id" not in session:
+        return redirect(url_for("auth.login_form"))
+    
+    user_id = session.get('user_id')
+    show_favorites_only = request.args.get('favorites_only') == '1'
+    
+    with get_db() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            # Verify dictionary ownership
+            cursor.execute(
+                "SELECT id, user_id, youtube_video_id, title, transcription, translation FROM dictionaries WHERE id = %s",
+                (dictionary_id,)
+            )
+            dictionary = cursor.fetchone()
+            
+            if not dictionary:
+                abort(404)
+            
+            if dictionary['user_id'] != user_id:
+                abort(403)
+            
+            # Get words for this dictionary
+            if show_favorites_only:
+                cursor.execute("""
+                    SELECT w.id, w.word, w.pronunciation_japanese, w.meaning_japanese, w.why_important
+                    FROM words w
+                    INNER JOIN favorites f ON w.id = f.word_id
+                    WHERE w.dictionary_id = %s AND f.user_id = %s
+                    ORDER BY w.word
+                """, (dictionary_id, user_id))
+            else:
+                cursor.execute("""
+                    SELECT w.id, w.word, w.pronunciation_japanese, w.meaning_japanese, w.why_important
+                    FROM words w
+                    WHERE w.dictionary_id = %s
+                    ORDER BY w.word
+                """, (dictionary_id,))
+            
+            words = cursor.fetchall()
+            
+            # Get favorited word IDs for this user
+            if words:
+                word_ids = [w['id'] for w in words]
+                placeholders = ','.join(['%s'] * len(word_ids))
+                cursor.execute(
+                    f"SELECT word_id FROM favorites WHERE user_id = %s AND word_id IN ({placeholders})",
+                    [user_id] + word_ids
+                )
+                favorited_ids = {row['word_id'] for row in cursor.fetchall()}
+            else:
+                favorited_ids = set()
+            
+            # Mark which words are favorited
+            for word in words:
+                word['is_favorited'] = word['id'] in favorited_ids
+    
+    return render_template("dictionary.html", dictionary=dictionary, words=words, show_favorites_only=show_favorites_only)
+
+@app.route('/api/favorite', methods=['POST'])
+def add_favorite():
+    """Add word to favorites - requires authentication"""
+    if "user_id" not in session:
+        return jsonify({'error': 'Authentication required'}), 401
+    
+    user_id = session.get('user_id')
+    data = request.get_json()
+    word_id = data.get('word_id')
+    
+    if not word_id:
+        return jsonify({'error': 'word_id is required'}), 400
+    
+    # Verify word exists and user has access to its dictionary
+    with get_db() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            # Get word's dictionary
+            cursor.execute(
+                "SELECT dictionary_id FROM words WHERE id = %s",
+                (word_id,)
+            )
+            word = cursor.fetchone()
+            
+            if not word:
+                return jsonify({'error': 'Word not found'}), 404
+            
+            # Verify dictionary ownership
+            cursor.execute(
+                "SELECT user_id FROM dictionaries WHERE id = %s",
+                (word['dictionary_id'],)
+            )
+            dictionary = cursor.fetchone()
+            
+            if not dictionary or dictionary['user_id'] != user_id:
+                return jsonify({'error': 'Unauthorized'}), 403
+            
+            # Check if already favorited
+            cursor.execute(
+                "SELECT word_id FROM favorites WHERE user_id = %s AND word_id = %s",
+                (user_id, word_id)
+            )
+            existing = cursor.fetchone()
+            
+            if existing:
+                return jsonify({'success': True, 'message': 'Already in favorites'})
+            
+            # Insert favorite
+            try:
+                cursor.execute(
+                    "INSERT INTO favorites (user_id, word_id) VALUES (%s, %s)",
+                    (user_id, word_id)
+                )
+                conn.commit()
+                return jsonify({'success': True, 'message': 'Added to favorites'})
+            except Exception as e:
+                # If unique constraint violation, it's already favorited
+                conn.rollback()
+                return jsonify({'success': True, 'message': 'Already in favorites'})
+
+@app.route('/api/unfavorite', methods=['POST'])
+def remove_favorite():
+    """Remove word from favorites - requires authentication"""
+    if "user_id" not in session:
+        return jsonify({'error': 'Authentication required'}), 401
+    
+    user_id = session.get('user_id')
+    data = request.get_json()
+    word_id = data.get('word_id')
+    
+    if not word_id:
+        return jsonify({'error': 'word_id is required'}), 400
+    
+    with get_db() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "DELETE FROM favorites WHERE user_id = %s AND word_id = %s",
+                (user_id, word_id)
+            )
+            conn.commit()
+            return jsonify({'success': True, 'message': 'Removed from favorites'})
+
+@app.route('/dictionaries')
+def dictionaries_list():
+    """List all dictionaries for current user - requires authentication"""
+    if "user_id" not in session:
+        return redirect(url_for("auth.login_form"))
+    
+    user_id = session.get('user_id')
+    
+    with get_db() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            cursor.execute("""
+                SELECT d.id, d.youtube_video_id, d.title, d.created_at,
+                       COUNT(w.id) as word_count
+                FROM dictionaries d
+                LEFT JOIN words w ON d.id = w.dictionary_id
+                WHERE d.user_id = %s
+                GROUP BY d.id, d.youtube_video_id, d.title, d.created_at
+                ORDER BY d.created_at DESC
+            """, (user_id,))
+            dictionaries = cursor.fetchall()
+    
+    return render_template("dictionaries.html", dictionaries=dictionaries)
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=8000)

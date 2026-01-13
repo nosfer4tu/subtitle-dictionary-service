@@ -328,6 +328,10 @@ def create_srt_file(segments: list, output_path: str):
             f.write(f"{start_time} --> {end_time}\n")
             f.write(f"{text}\n\n")
 
+MIN_SUBTITLE_DURATION_SECONDS = 1.5
+SILENCE_THRESHOLD_SECONDS = 0.8  # Max gap between speech segments to merge into a block
+
+
 def format_timestamp(seconds: float) -> str:
     """Format seconds to SRT timestamp format (HH:MM:SS,mmm)"""
     hours = int(seconds // 3600)
@@ -336,11 +340,120 @@ def format_timestamp(seconds: float) -> str:
     millis = int((seconds % 1) * 1000)
     return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
 
+def build_speech_blocks(asr_segments: list) -> list:
+    """
+    Build speech blocks from ASR segments by merging adjacent segments whose
+    silence gap is less than SILENCE_THRESHOLD_SECONDS and that contain text.
+    
+    Music-only or silent gaps MUST NOT produce blocks.
+    """
+    if not asr_segments:
+        return []
+
+    # Consider only segments with non-empty text as speech
+    speech_segments = [
+        seg for seg in asr_segments
+        if str(seg.get("text", "")).strip()
+    ]
+    if not speech_segments:
+        return []
+
+    # Ensure segments are sorted by start time
+    speech_segments.sort(key=lambda s: s.get("start", 0.0))
+
+    blocks = []
+    first_seg = speech_segments[0]
+    current_block = {
+        "start": first_seg.get("start", 0.0),
+        "end": first_seg.get("end", first_seg.get("start", 0.0)),
+        "segments": [first_seg],
+    }
+    last_seg_end = current_block["end"]
+
+    silence_gaps = []
+
+    for seg in speech_segments[1:]:
+        seg_start = seg.get("start", 0.0)
+        seg_end = seg.get("end", seg_start)
+        gap = seg_start - last_seg_end
+
+        if gap >= 0:
+            silence_gaps.append(gap)
+
+        if gap < SILENCE_THRESHOLD_SECONDS:
+            # Same speech block
+            current_block["end"] = max(current_block["end"], seg_end)
+            current_block["segments"].append(seg)
+        else:
+            # Start a new speech block
+            blocks.append(current_block)
+            current_block = {
+                "start": seg_start,
+                "end": seg_end,
+                "segments": [seg],
+            }
+
+        last_seg_end = seg_end
+
+    # Append the last block
+    blocks.append(current_block)
+
+    avg_silence_gap = sum(silence_gaps) / len(silence_gaps) if silence_gaps else 0.0
+
+    # Attach debug info via an attribute on the list (without changing signatures)
+    try:
+        blocks.debug = {
+            "total_asr_segments": len(asr_segments),
+            "total_speech_blocks": len(blocks),
+            "avg_silence_gap": avg_silence_gap,
+        }
+    except Exception:
+        # If attribute setting fails for any reason, ignore — it's only for logging
+        pass
+
+    return blocks
+
+
+def align_japanese_to_segments(asr_segments: list, full_japanese_translation: str) -> list:
+    """
+    Simple order-based alignment:
+    - Split full Japanese text into sentences by 。！？.
+    - Assign sentence i to ASR segment i (by index).
+    - Preserve ASR start/end timestamps exactly.
+    """
+    aligned_subtitles = []
+
+    # Split Japanese translation into sentences, preserving punctuation and order
+    japanese_sentences = []
+    if full_japanese_translation:
+        current = ""
+        for ch in full_japanese_translation:
+            current += ch
+            if ch in "。！？":
+                sentence = current.strip()
+                if sentence:
+                    japanese_sentences.append(sentence)
+                current = ""
+        if current.strip():
+            japanese_sentences.append(current.strip())
+
+    # Map sentences to ASR segments by index
+    for idx, seg in enumerate(asr_segments):
+        start = seg.get("start", 0.0)
+        end = seg.get("end", start)
+        text = japanese_sentences[idx] if idx < len(japanese_sentences) else ""
+        aligned_subtitles.append({
+            "start": start,
+            "end": end,
+            "text": text,
+        })
+
+    return aligned_subtitles
+
 def process_video_with_subtitles(
     video_path: str,
     output_path: str,
     source_segments: list,
-    japanese_translation: str,
     detected_terms: dict = None
 ) -> str:
     """
@@ -350,14 +463,14 @@ def process_video_with_subtitles(
     Args:
         video_path: Path to input video
         output_path: Path to output video
-        source_segments: List of segments with timestamps in source language
-        japanese_translation: Japanese translation text
+        source_segments: List of segments with timestamps in source language.
+                        Each segment must include:
+                          - 'text': source (English) text
+                          - 'start': start time (seconds)
+                          - 'end': end time (seconds)
+                          - 'japanese_text': per-segment Japanese translation
         detected_terms: Dictionary with detected cultural terms (optional)
     """
-    # Split Japanese translation into segments matching source segments
-    japanese_sentences = re.split(r'[。！？]\s*', japanese_translation)
-    japanese_sentences = [s.strip() for s in japanese_sentences if s.strip()]
-    
     # Create a mapping of cultural terms to their full information
     term_info_map = {}  # word -> {pronunciation, meaning, why_important}
     term_words_lower = {}  # For case-insensitive matching
@@ -395,8 +508,8 @@ def process_video_with_subtitles(
             start_time = format_timestamp(segment['start'])
             end_time = format_timestamp(segment['end'])
             
-            # Match Japanese translation to source segment
-            japanese_text = japanese_sentences[i-1] if i-1 < len(japanese_sentences) else ""
+            # Use per-segment Japanese translation
+            japanese_text = segment.get('japanese_text', '')
             
             # Check if any cultural terms appear in this segment
             source_text = segment['text']
@@ -538,7 +651,13 @@ def process_video_with_subtitles(
 
 def process_trailer_video(video_path: str, output_path: str, language: str = None) -> dict:
     """
-    Complete workflow with per-segment language detection and translation.
+    Complete workflow with DB-driven English → Japanese translation.
+    
+    NEW PIPELINE:
+    1. Extract audio and transcribe to get source_transcription (English)
+    2. Read source_transcription and translate directly to Japanese in a single call
+    3. Store result as final Japanese output
+    4. Burn subtitles into video
     
     Args:
         video_path: Path to video file
@@ -553,167 +672,112 @@ def process_trailer_video(video_path: str, output_path: str, language: str = Non
         temp_audio = video_path.rsplit('.', 1)[0] + '_temp_audio.mp3'
         extract_audio_from_video(video_path, temp_audio)
         
-        # Step 2: Transcribe with timestamps and per-segment language detection
-        source_segments = transcribe_with_timestamps(temp_audio, language=None)  # Let Whisper auto-detect
+        # Step 2: Transcribe with timestamps to get source_transcription
+        source_segments = transcribe_with_timestamps(temp_audio, language=None)
         
         if not source_segments:
             raise ValueError("No segments transcribed")
         
-        # Step 3: Translate each segment using its detected language
-        translated_segments = []
-        all_cultural_terms = []
-        
-        from backend_python.translate import process_transcription_pipeline, LANGUAGE_NAMES
+        # Step 2.5: Per-segment cleanup and translation for perfect timing
+        from backend_python.translate import cleanup_english_transcription, translate_english_to_japanese
         from backend_python.detect_terms import detect_terms
-        
-        for seg_idx, segment in enumerate(source_segments):
-            seg_text = segment['text']
-            seg_lang = segment.get('detected_language', 'hi')
-            seg_script = segment.get('script', 'Unknown')
-            seg_confidence = segment.get('confidence', 0.5)
-            needs_review = segment.get('needs_review', False)
-            
-            print(f"Segment {seg_idx + 1}/{len(source_segments)}: lang={seg_lang}, script={seg_script}, confidence={seg_confidence:.2f}", flush=True)
-            
-            # Skip low-confidence segments or mark for review
-            if needs_review:
-                print(f"  Warning: Low confidence segment, may need review", flush=True)
-            
-            # === USE MAIN PIPELINE: Process through Call 1 → has_clear_english() → Call 2 ===
-            # This is the ONLY allowed translation path - enforces all gates
-            try:
-                # Process segment through the strict pipeline
-                pipeline_result = process_transcription_pipeline(seg_text)
-                
-                # Extract Japanese translation from pipeline result
-                # Format: "Sentence 1: <translation>\nSentence 2: <translation>"
-                japanese_translation_text = pipeline_result.get('japanese_translation', '')
-                
-                # === DEBUG: Pipeline result for this segment ===
-                print("=" * 80, flush=True)
-                print(f"=== DEBUG: Pipeline result for segment {seg_idx + 1} ===", flush=True)
-                print(f"  japanese_translation_text: {repr(japanese_translation_text[:200])}", flush=True)
-                print("=" * 80, flush=True)
-                
-                # Parse the formatted output to extract just the translation text
-                # Remove "Sentence X: " prefixes and join lines
-                if japanese_translation_text:
-                    lines = japanese_translation_text.split('\n')
-                    translation_lines = []
-                    for line in lines:
-                        # Remove "Sentence X: " prefix if present
-                        if ': ' in line:
-                            translation = line.split(': ', 1)[1]
-                        else:
-                            translation = line
-                        if translation.strip():
-                            translation_lines.append(translation.strip())
-                    japanese_text = ' '.join(translation_lines) if translation_lines else ""
-                else:
-                    japanese_text = ""
-                
-                # If pipeline returned empty (gate blocked or Call 2 failed), leave empty
-                # DO NOT replace with placeholder - empty is correct for both cases
-                if not japanese_text or not japanese_text.strip():
-                    print(f"  Pipeline returned empty for segment {seg_idx + 1} - leaving empty (no placeholder)", flush=True)
-                    japanese_text = ""  # Empty string - correct behavior (gate blocked OR Call 2 returned empty)
-                
-                # Detect cultural terms for this segment (after translation)
-                segment_terms = []
-                try:
-                    terms_result = detect_terms(seg_text, source_language=seg_lang)
-                    if terms_result and isinstance(terms_result, dict):
-                        terms_list = terms_result.get('terms', [])
-                        segment_terms = terms_list
-                        all_cultural_terms.extend(terms_list)
-                except Exception as e:
-                    print(f"  Error detecting terms for segment {seg_idx + 1}: {e}", flush=True)
-                
-                translated_segments.append({
-                    'text_original': seg_text,
-                    'language': seg_lang,
-                    'script': seg_script,
-                    'translation_ja': japanese_text,
-                    'cultural_terms': segment_terms,
-                    'start': segment['start'],
-                    'end': segment['end'],
-                    'confidence': seg_confidence,
-                    'needs_review': needs_review
-                })
-                
-            except Exception as e:
-                print(f"  Error translating segment {seg_idx + 1}: {e}", flush=True)
-                # Add segment with empty translation (not error message)
-                translated_segments.append({
-                    'text_original': seg_text,
-                    'language': seg_lang,
-                    'script': seg_script,
-                    'translation_ja': "",  # Empty, not error message
-                    'cultural_terms': [],
-                    'start': segment['start'],
-                    'end': segment['end'],
-                    'confidence': seg_confidence,
-                    'needs_review': True
-                })
-        
-        # Combine translations (filter out empty translations)
-        source_text = ' '.join([seg['text_original'] for seg in translated_segments])
-        japanese_text = ' '.join([seg['translation_ja'] for seg in translated_segments if seg['translation_ja']])
-        
-        # === DEBUG: Final combined japanese_text before return ===
-        print("=" * 80, flush=True)
-        print("=== DEBUG: Final combined japanese_text ===", flush=True)
-        print(f"  japanese_text length: {len(japanese_text) if japanese_text else 0}", flush=True)
-        print(f"  japanese_text preview: {repr(japanese_text[:200]) if japanese_text else 'EMPTY'}", flush=True)
-        print(f"  Contains placeholder: {'意味不明' in japanese_text if japanese_text else False}", flush=True)
-        print("=" * 80, flush=True)
-        
-        # Aggregate cultural terms (deduplicate)
-        unique_terms = {}
-        for term in all_cultural_terms:
-            term_word = term.get('word', '')
-            if term_word and term_word not in unique_terms:
-                unique_terms[term_word] = term
-        detected_terms = {"terms": list(unique_terms.values())}
-        
-        print(f"Translation complete: {len(translated_segments)} segments, {len(detected_terms.get('terms', []))} unique cultural terms", flush=True)
-        
-        # Step 4 & 5: Burn subtitles into video
-        # Convert translated_segments to format expected by process_video_with_subtitles
+
         subtitle_segments = []
-        for seg in translated_segments:
+        cleaned_segments = []
+        print("=" * 80, flush=True)
+        print("=== PER-SEGMENT TRANSLATION PIPELINE ===", flush=True)
+        
+        for idx, seg in enumerate(source_segments):
+            raw_text = seg.get('text', '') or ''
+            start = seg.get('start', 0.0)
+            end = seg.get('end', start)
+            duration = end - start
+            
+            cleaned_en = cleanup_english_transcription(raw_text) or ""
+            
+            jp_text = ""
+            if cleaned_en.strip():
+                try:
+                    from backend_python.translate import translate_subtitle_segment
+                    jp_text = translate_subtitle_segment(cleaned_en)
+                except Exception as e:
+                    print(f"[SEG {idx}] Translation error: {e}", flush=True)
+                    jp_text = ""
+            
+            print(f"[SEG {idx}] duration={duration:.2f}s", flush=True)
+            print(f"[SEG {idx}] JP: {repr(jp_text[:120])}", flush=True)
+            
+            cleaned_segments.append(cleaned_en)
             subtitle_segments.append({
-                'text': seg['text_original'],
-                'start': seg['start'],
-                'end': seg['end']
+                'text': raw_text,
+                'start': start,
+                'end': end,
+                'japanese_text': jp_text,
             })
         
-        process_video_with_subtitles(video_path, output_path, subtitle_segments, japanese_text, detected_terms=detected_terms)
+        print("=" * 80, flush=True)
         
-        # === FINAL SAFEGUARD: Ensure empty strings are NEVER replaced with placeholders ===
-        # If japanese_text is empty (all segments filtered out or Call 2 returned empty), leave it empty
-        # DO NOT add placeholder - empty is correct for sentences that passed gate but have no translation
-        if not japanese_text or not japanese_text.strip():
-            print("=" * 80, flush=True)
-            print("FINAL SAFEGUARD: japanese_text is empty - leaving empty (NO placeholder)", flush=True)
-            print(f"  This is correct for: passed sentences with empty Call 2 output", flush=True)
-            print("=" * 80, flush=True)
-            japanese_text = ""  # Explicitly ensure it's empty, not a placeholder
+        # Detect cultural terms from the full source text (optional, for subtitle annotations)
+        detected_terms = {"terms": []}
+        try:
+            # Use the most common language from segments for term detection
+            lang_counts = {}
+            for seg in source_segments:
+                lang = seg.get('detected_language', 'hi')
+                lang_counts[lang] = lang_counts.get(lang, 0) + 1
+            most_common_lang = max(lang_counts.items(), key=lambda x: x[1])[0] if lang_counts else 'hi'
+            
+            # Use combined cleaned English for term detection
+            source_text_for_terms = ' '.join(s for s in cleaned_segments if s.strip())
+            terms_result = detect_terms(source_text_for_terms, source_language=most_common_lang)
+            if terms_result and isinstance(terms_result, dict):
+                detected_terms = terms_result
+                print(f"Detected {len(detected_terms.get('terms', []))} cultural terms", flush=True)
+        except Exception as e:
+            print(f"Error detecting terms: {e}", flush=True)
         
-        # Verify no placeholder was accidentally added
-        if "意味不明" in japanese_text and not any(seg.get('translation_ja', '').startswith("意味不明") for seg in translated_segments if seg.get('translation_ja')):
-            print("=" * 80, flush=True)
-            print("WARNING: Placeholder detected in final japanese_text but not in segments!", flush=True)
-            print(f"  japanese_text: {repr(japanese_text[:100])}", flush=True)
-            print("=" * 80, flush=True)
+        # Step 4 & 5: Burn subtitles into video using per-segment translations
+        process_video_with_subtitles(video_path, output_path, subtitle_segments, detected_terms=detected_terms)
+        
+        # Determine language (for compatibility)
+        lang_counts = {}
+        for seg in source_segments:
+            lang = seg.get('detected_language', 'hi')
+            lang_counts[lang] = lang_counts.get(lang, 0) + 1
+        detected_language = max(lang_counts.items(), key=lambda x: x[1])[0] if lang_counts else 'unknown'
+        if len(lang_counts) > 1:
+            detected_language = 'mixed'
+        
+        # Build segments output for compatibility
+        translated_segments = []
+        for idx, seg in enumerate(source_segments):
+            translated_segments.append({
+                'text_original': seg['text'],
+                'language': seg.get('detected_language', 'hi'),
+                'script': seg.get('script', 'Unknown'),
+                'translation_ja': subtitle_segments[idx].get('japanese_text', ''),
+                'cultural_terms': [],
+                'start': seg['start'],
+                'end': seg['end'],
+                'confidence': seg.get('confidence', 0.5),
+                'needs_review': seg.get('needs_review', False)
+            })
+        
+        print("=" * 80, flush=True)
+        print("=== TRANSLATION PIPELINE COMPLETE ===", flush=True)
+        full_cleaned = ' '.join(s for s in cleaned_segments if s.strip())
+        print(f"Source transcription (cleaned, combined): {len(full_cleaned)} chars", flush=True)
+        total_jp_chars = sum(len(s.get('japanese_text', '') or '') for s in subtitle_segments)
+        print(f"Total Japanese translation chars (per-segment sum): {total_jp_chars}", flush=True)
+        print("=" * 80, flush=True)
         
         return {
-            'source_transcription': source_text,
-            'japanese_translation': japanese_text,  # Empty string if no translations - DO NOT replace
+            'source_transcription': full_cleaned,
+            'japanese_translation': '\n'.join(s.get('japanese_text', '') or '' for s in subtitle_segments),
             'detected_terms': detected_terms,
             'output_video': output_path,
-            'segments': translated_segments,  # Full structured output
-            'language': 'mixed' if len(set(s['language'] for s in translated_segments)) > 1 else translated_segments[0]['language'] if translated_segments else 'unknown'
+            'segments': translated_segments,  # For compatibility (translation_ja not used)
+            'language': detected_language
         }
     finally:
         # Clean up temporary audio file

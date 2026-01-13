@@ -9,4 +9,4 @@ __pycache__/
 *.code-workspace
 .vercel
 node_modules
-.video_cache/
+video_cache
