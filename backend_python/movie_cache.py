@@ -76,15 +76,29 @@ def get_cached_movie(movie_id: int = None, video_id: str = None):
                     # Check if cached video file exists
                     cached_video_path = get_cached_video_path(cached_video_id)
                     
-                    # Parse detected_terms
+                    # Parse detected_terms (JSONB is already parsed by psycopg2, but might be string in some cases)
                     detected_terms = None
                     if row[4]:  # detected_terms column
                         try:
-                            detected_terms = json.loads(row[4])
+                            if isinstance(row[4], str):
+                                detected_terms = json.loads(row[4])
+                            else:
+                                detected_terms = row[4]  # Already a dict/list from JSONB
                             terms_count = len(detected_terms.get('terms', [])) if isinstance(detected_terms, dict) else 0
                             print(f"Retrieved {terms_count} cultural terms from cache", flush=True)
                         except Exception as e:
                             print(f"Warning: Could not parse cached detected_terms: {e}", flush=True)
+                    
+                    # Parse segments (JSONB is already parsed by psycopg2, but might be string in some cases)
+                    segments = None
+                    if row[6]:  # segments column
+                        try:
+                            if isinstance(row[6], str):
+                                segments = json.loads(row[6])
+                            else:
+                                segments = row[6]  # Already a list/dict from JSONB
+                        except Exception as e:
+                            print(f"Warning: Could not parse cached segments: {e}", flush=True)
                     
                     return {
                         'movie_id': row[0],
@@ -93,7 +107,7 @@ def get_cached_movie(movie_id: int = None, video_id: str = None):
                         'japanese_translation': row[3],
                         'detected_terms': detected_terms,
                         'language': row[5],
-                        'segments': json.loads(row[6]) if row[6] else None,
+                        'segments': segments,
                         'pipeline_version': row[7] if row[7] is not None else 1,  # Default to 1 for old cache entries
                         'created_at': row[8],
                         'updated_at': row[9],
