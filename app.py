@@ -17,6 +17,22 @@ from backend_python.movie_cache import (
     get_cached_video_path,
     create_movie_cache_table  # Add this import
 )
+from backend_python.watch_history import (
+    create_watch_history_table,
+    add_watch_history,
+    get_watch_history,
+    delete_watch_history_entry,
+    clear_watch_history
+)
+from backend_python.watch_later import (
+    create_watch_later_table,
+    add_to_watch_later,
+    remove_from_watch_later,
+    is_in_watch_later,
+    get_watch_later,
+    delete_watch_later_entry,
+    clear_watch_later
+)
 import tempfile
 import shutil  # Add shutil import for file operations
 
@@ -30,7 +46,8 @@ app.register_blueprint(auth_blueprint)
 
 # Pipeline version for cache invalidation
 # Increment this when the translation pipeline logic changes
-PIPELINE_VERSION = 2
+# Version 3: Removed source text from subtitles, display detected terms on middle-right in vertical line
+PIPELINE_VERSION = 15
 
 # Initialize database tables on startup
 try:
@@ -42,6 +59,16 @@ try:
     create_movie_cache_table()
 except Exception as e:
     print(f"Warning: Could not initialize movie cache table: {e}", flush=True)
+
+try:
+    create_watch_history_table()
+except Exception as e:
+    print(f"Warning: Could not initialize watch history table: {e}", flush=True)
+
+try:
+    create_watch_later_table()
+except Exception as e:
+    print(f"Warning: Could not initialize watch later table: {e}", flush=True)
 
 @app.route('/')
 def index():
@@ -83,12 +110,17 @@ def app_index():
 @app.route('/movie/<int:movie_id>')
 def movie_detail(movie_id):
     """Movie detail page that automatically uploads trailer"""
+    if "user_id" not in session:
+        return redirect(url_for("auth.login_form"))
+    
+    user_id = session.get('user_id')
     movie = get_movie_details(movie_id)
     if not movie:
         return render_template("error.html", message="Movie not found or language not supported"), 404
     
     trailer_url = get_movie_trailer(movie_id)
-    return render_template("movie_detail.html", movie=movie, trailer_url=trailer_url)
+    in_watch_later = is_in_watch_later(user_id, movie_id)
+    return render_template("movie_detail.html", movie=movie, trailer_url=trailer_url, in_watch_later=in_watch_later)
 
 @app.route('/api/video/<path:filename>')
 def serve_video(filename):
@@ -199,6 +231,12 @@ def upload_trailer():
                 except Exception as db_error:
                     print(f"Database error (non-critical): {db_error}", flush=True)
                 
+                # Record watch history
+                try:
+                    add_watch_history(user_id, movie_id, video_id, movie_title)
+                except Exception as watch_error:
+                    print(f"Error recording watch history (non-critical): {watch_error}", flush=True)
+                
                 return jsonify({
                     'success': True,
                     'trailer_url': trailer_url,
@@ -271,10 +309,17 @@ def upload_trailer():
         try:
             result = process_trailer_video(actual_video_path, output_path, language=language)
         except ValueError as ve:
-            if "OPENAI_API_KEY" in str(ve):
+            error_msg = str(ve)
+            if "OPENAI_API_KEY" in error_msg:
                 return jsonify({
                     'error': 'OpenAI API key is not configured. Please set OPENAI_API_KEY in your .env file or environment variables.'
                 }), 500
+            # Check if it's a generic content detection error
+            if "generic/demo content" in error_msg.lower() or "generic content" in error_msg.lower():
+                return jsonify({
+                    'error': error_msg,
+                    'error_type': 'generic_content'
+                }), 400
             raise
         
         # Save to cache (including video file)
@@ -344,6 +389,12 @@ def upload_trailer():
                 os.remove(video_path)
             except:
                 pass
+        
+        # Record watch history
+        try:
+            add_watch_history(user_id, movie_id, video_id, movie_title)
+        except Exception as watch_error:
+            print(f"Error recording watch history (non-critical): {watch_error}", flush=True)
         
         return jsonify({
             'success': True,
@@ -528,6 +579,179 @@ def dictionaries_list():
             dictionaries = cursor.fetchall()
     
     return render_template("dictionaries.html", dictionaries=dictionaries)
+
+@app.route('/watch-history')
+def watch_history_page():
+    """Display watch history for current user - requires authentication"""
+    if "user_id" not in session:
+        return redirect(url_for("auth.login_form"))
+    
+    user_id = session.get('user_id')
+    history = get_watch_history(user_id, limit=100)
+    
+    # Enrich history with movie details from TMDB
+    from backend_python.tmdb import get_movie_details
+    enriched_history = []
+    for entry in history:
+        movie_details = get_movie_details(entry['movie_id'])
+        entry_dict = dict(entry)
+        if movie_details:
+            entry_dict['poster_path'] = movie_details.get('poster_path')
+            entry_dict['release_date'] = movie_details.get('release_date')
+            entry_dict['vote_average'] = movie_details.get('vote_average')
+        enriched_history.append(entry_dict)
+    
+    return render_template("watch_history.html", history=enriched_history)
+
+@app.route('/api/watch-history', methods=['GET'])
+def get_watch_history_api():
+    """Get watch history as JSON - requires authentication"""
+    if "user_id" not in session:
+        return jsonify({'error': 'Authentication required'}), 401
+    
+    user_id = session.get('user_id')
+    limit = request.args.get('limit', 50, type=int)
+    history = get_watch_history(user_id, limit=limit)
+    
+    return jsonify({'success': True, 'history': history})
+
+@app.route('/api/watch-history/<int:entry_id>', methods=['DELETE'])
+def delete_watch_history_entry_api(entry_id):
+    """Delete a watch history entry - requires authentication"""
+    if "user_id" not in session:
+        return jsonify({'error': 'Authentication required'}), 401
+    
+    user_id = session.get('user_id')
+    success = delete_watch_history_entry(user_id, entry_id)
+    
+    if success:
+        return jsonify({'success': True, 'message': 'Watch history entry deleted'})
+    else:
+        return jsonify({'error': 'Entry not found or unauthorized'}), 404
+
+@app.route('/api/watch-history/clear', methods=['POST'])
+def clear_watch_history_api():
+    """Clear all watch history - requires authentication"""
+    if "user_id" not in session:
+        return jsonify({'error': 'Authentication required'}), 401
+    
+    user_id = session.get('user_id')
+    success = clear_watch_history(user_id)
+    
+    if success:
+        return jsonify({'success': True, 'message': 'Watch history cleared'})
+    else:
+        return jsonify({'error': 'Failed to clear watch history'}), 500
+
+@app.route('/watch-later')
+def watch_later_page():
+    """Display watch later list for current user - requires authentication"""
+    if "user_id" not in session:
+        return redirect(url_for("auth.login_form"))
+    
+    user_id = session.get('user_id')
+    watch_later_list = get_watch_later(user_id, limit=200)
+    
+    # Enrich with movie details from TMDB
+    from backend_python.tmdb import get_movie_details
+    enriched_list = []
+    for entry in watch_later_list:
+        movie_details = get_movie_details(entry['movie_id'])
+        entry_dict = dict(entry)
+        if movie_details:
+            entry_dict['poster_path'] = movie_details.get('poster_path')
+            entry_dict['release_date'] = movie_details.get('release_date')
+            entry_dict['vote_average'] = movie_details.get('vote_average')
+            entry_dict['overview'] = movie_details.get('overview')
+        enriched_list.append(entry_dict)
+    
+    return render_template("watch_later.html", watch_later=enriched_list)
+
+@app.route('/api/watch-later', methods=['GET'])
+def get_watch_later_api():
+    """Get watch later list as JSON - requires authentication"""
+    if "user_id" not in session:
+        return jsonify({'error': 'Authentication required'}), 401
+    
+    user_id = session.get('user_id')
+    limit = request.args.get('limit', 100, type=int)
+    watch_later_list = get_watch_later(user_id, limit=limit)
+    
+    return jsonify({'success': True, 'watch_later': watch_later_list})
+
+@app.route('/api/watch-later/check/<int:movie_id>', methods=['GET'])
+def check_watch_later_api(movie_id):
+    """Check if movie is in watch later - requires authentication"""
+    if "user_id" not in session:
+        return jsonify({'error': 'Authentication required'}), 401
+    
+    user_id = session.get('user_id')
+    in_list = is_in_watch_later(user_id, movie_id)
+    
+    return jsonify({'success': True, 'in_watch_later': in_list})
+
+@app.route('/api/watch-later', methods=['POST'])
+def add_watch_later_api():
+    """Add movie to watch later - requires authentication"""
+    if "user_id" not in session:
+        return jsonify({'error': 'Authentication required'}), 401
+    
+    user_id = session.get('user_id')
+    data = request.get_json()
+    movie_id = data.get('movie_id')
+    movie_title = data.get('movie_title')
+    
+    if not movie_id:
+        return jsonify({'error': 'movie_id is required'}), 400
+    
+    success = add_to_watch_later(user_id, movie_id, movie_title)
+    
+    if success:
+        return jsonify({'success': True, 'message': 'Added to watch later'})
+    else:
+        return jsonify({'error': 'Failed to add to watch later'}), 500
+
+@app.route('/api/watch-later/<int:movie_id>', methods=['DELETE'])
+def remove_watch_later_api(movie_id):
+    """Remove movie from watch later - requires authentication"""
+    if "user_id" not in session:
+        return jsonify({'error': 'Authentication required'}), 401
+    
+    user_id = session.get('user_id')
+    success = remove_from_watch_later(user_id, movie_id)
+    
+    if success:
+        return jsonify({'success': True, 'message': 'Removed from watch later'})
+    else:
+        return jsonify({'error': 'Movie not in watch later'}), 404
+
+@app.route('/api/watch-later/entry/<int:entry_id>', methods=['DELETE'])
+def delete_watch_later_entry_api(entry_id):
+    """Delete a watch later entry - requires authentication"""
+    if "user_id" not in session:
+        return jsonify({'error': 'Authentication required'}), 401
+    
+    user_id = session.get('user_id')
+    success = delete_watch_later_entry(user_id, entry_id)
+    
+    if success:
+        return jsonify({'success': True, 'message': 'Watch later entry deleted'})
+    else:
+        return jsonify({'error': 'Entry not found or unauthorized'}), 404
+
+@app.route('/api/watch-later/clear', methods=['POST'])
+def clear_watch_later_api():
+    """Clear all watch later entries - requires authentication"""
+    if "user_id" not in session:
+        return jsonify({'error': 'Authentication required'}), 401
+    
+    user_id = session.get('user_id')
+    success = clear_watch_later(user_id)
+    
+    if success:
+        return jsonify({'success': True, 'message': 'Watch later cleared'})
+    else:
+        return jsonify({'error': 'Failed to clear watch later'}), 500
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=8000)

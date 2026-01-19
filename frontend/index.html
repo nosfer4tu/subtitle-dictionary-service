@@ -26,7 +26,11 @@
         <div class="container">
             <div class="main-content">
                 <div style="margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center;">
-                    <a href="{{ url_for('dictionaries_list') }}" style="color: #667eea; text-decoration: none; font-weight: 500;">辞書一覧を見る</a>
+                    <div style="display: flex; gap: 20px;">
+                        <a href="{{ url_for('dictionaries_list') }}" style="color: #667eea; text-decoration: none; font-weight: 500;">辞書一覧を見る</a>
+                        <a href="{{ url_for('watch_history_page') }}" style="color: #667eea; text-decoration: none; font-weight: 500;">視聴履歴</a>
+                        <a href="{{ url_for('watch_later_page') }}" style="color: #667eea; text-decoration: none; font-weight: 500;">後で見る</a>
+                    </div>
                     <a href="{{ url_for('auth.logout') }}" style="color: #666; text-decoration: none; font-size: 14px;">ログアウト</a>
                 </div>
                 <h2>映画を探す</h2>

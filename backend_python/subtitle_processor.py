@@ -7,6 +7,7 @@ from backend_python.detect_terms import detect_terms
 import re
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections import Counter
 
 def verify_video_file(video_path: str) -> bool:
     """Verify that a video file is valid and not corrupted"""
@@ -595,46 +596,224 @@ def process_video_with_subtitles(
             srt_file.write(f"{i}\n")
             srt_file.write(f"{start_time} --> {end_time}\n")
             
-            # Build subtitle text
-            subtitle_lines = []
-            subtitle_lines.append(source_text)  # Source language (first line)
-            
-            # Sanitize Japanese text as well
+            # Build subtitle text - ONLY Japanese (removed source text and terms)
+            # Sanitize Japanese text
             japanese_text_sanitized = sanitize_subtitle_text(japanese_text)
-            subtitle_lines.append(japanese_text_sanitized)  # Japanese translation (second line)
+            srt_file.write(f"{japanese_text_sanitized}\n\n")
             
-            # Add cultural term annotations if any were found
+            # Store terms for this segment (will be displayed separately on right side)
             if cultural_annotations:
-                # Join all annotations with " / " separator
-                # Format: 発音1 (意味1) / 発音2 (意味2)
+                # Store segment index and annotations for later ASS file creation
+                if not hasattr(srt_file, '_term_segments'):
+                    srt_file._term_segments = {}
+                srt_file._term_segments[i - 1] = cultural_annotations  # Store with 0-based index
                 annotations_text = " / ".join(cultural_annotations)
-                subtitle_lines.append(f"※ {annotations_text}")  # Cultural meanings (third line with ※ marker)
-                print(f"  ✓ Added cultural annotation to segment {i}: {annotations_text[:80]}...", flush=True)
-            
-            srt_file.write("\n".join(subtitle_lines) + "\n\n")
+                print(f"  ✓ Found terms in segment {i}: {annotations_text[:80]}...", flush=True)
         
         srt_path = srt_file.name
+        term_segments_map = getattr(srt_file, '_term_segments', {})
+    
+    # Create separate ASS file for detected terms (middle-right, vertical line)
+    terms_ass_path = None
+    if term_segments_map:
+        try:
+            # Get actual video resolution for proper positioning
+            video_width = 1920
+            video_height = 1080
+            try:
+                result = subprocess.run(
+                    ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
+                     '-show_entries', 'stream=width,height', '-of', 'csv=s=x:p=0', video_path],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=10
+                )
+                if result.returncode == 0 and result.stdout:
+                    resolution = result.stdout.decode('utf-8').strip()
+                    if 'x' in resolution:
+                        video_width, video_height = map(int, resolution.split('x'))
+                        print(f"Detected video resolution: {video_width}x{video_height}", flush=True)
+            except Exception as e:
+                print(f"Could not detect video resolution, using default 1920x1080: {e}", flush=True)
+            
+            # Create ASS file for terms
+            play_res_x = video_width
+            play_res_y = video_height
+            center_y = video_height // 2  # Middle of screen
+            
+            ass_content = []
+            ass_content.append("[Script Info]")
+            ass_content.append("Title: Detected Terms")
+            ass_content.append("ScriptType: v4.00+")
+            ass_content.append(f"PlayResX: {play_res_x}")
+            ass_content.append(f"PlayResY: {play_res_y}")
+            ass_content.append("")
+            ass_content.append("[V4+ Styles]")
+            ass_content.append("Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding")
+            # Style: TermsRight - positioned on middle-right, cyan color
+            # Alignment=6 = middle-right (for vertical centering)
+            # We'll override with \an6\pos() in dialogue lines for exact positioning
+            # Make font larger and more visible - increased to 34
+            ass_content.append("Style: TermsRight,Arial,34,&H00FFFF,&H00FFFF,&H000000,&H80000000,0,0,0,0,100,100,0,0,1,3,0,6,0,0,0,1")
+            ass_content.append("")
+            ass_content.append("[Events]")
+            ass_content.append("Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text")
+            
+            # Create dialogue entries per segment - show terms only when they appear
+            dialogue_count = 0
+            sorted_segments = sorted(term_segments_map.items())
+            
+            for seg_idx, annotations in sorted_segments:
+                if seg_idx < len(source_segments):
+                    segment = source_segments[seg_idx]
+                    start_time = segment['start']
+                    end_time = segment['end']
+                    start_str = format_timestamp(start_time)
+                    end_str = format_timestamp(end_time)
+                    
+                    # Sort annotations for consistent vertical order
+                    sorted_annotations = sorted(annotations)
+                    num_terms = len(sorted_annotations)
+                    
+                    # Stack terms vertically from center with more spacing
+                    # Increased spacing to 60 pixels for better vertical line separation
+                    vertical_spacing = 60
+                    start_offset = -(num_terms - 1) * vertical_spacing // 2
+                    
+                    for idx, term in enumerate(sorted_annotations):
+                        y_pos = center_y + start_offset + (idx * vertical_spacing)
+                        x_pos = video_width - 50  # Right side with margin
+                        
+                        # Parse term to extract pronunciation and meaning
+                        # Format is currently: "pronunciation (meaning)"
+                        # Convert BOTH pronunciation AND meaning to true vertical Japanese text.
+                        # Each character is on its own line, and we add a reference mark at the top.
+                        if ' (' in term and term.endswith(')'):
+                            # Split pronunciation and meaning
+                            parts = term.rsplit(' (', 1)
+                            pronunciation = parts[0]
+                            meaning = parts[1].rstrip(')')
+                            
+                            # Make pronunciation vertical: each character on its own line
+                            vertical_pronunciation = "\\N".join(list(pronunciation))
+                            
+                            # Make meaning vertical: each character on its own line
+                            vertical_meaning = "\\N".join(list(meaning))
+                            
+                            # Reference mark at the very top (e.g. ※), then a blank line,
+                            # then vertical pronunciation, another blank line,
+                            # then vertical meaning. All vertical.
+                            reference_mark = "※"
+                            formatted_term = (
+                                f"{reference_mark}"
+                                f"\\N"            # blank line after reference mark (since next starts with \N)
+                                f"\\N{vertical_pronunciation}"
+                                f"\\N"            # extra space between pronunciation and meaning
+                                f"\\N{vertical_meaning}"
+                            )
+                        else:
+                            # Fallback: convert entire term to vertical character by character
+                            formatted_term = "\\N".join(list(term))
+                        
+                        # Use \an6\pos() - \an6 sets anchor to middle-right (6)
+                        # \pos() then positions at exact coordinates
+                        # \N creates a line break in ASS format
+                        dialogue_line = f"Dialogue: 0,{start_str},{end_str},TermsRight,,0,0,0,,{{\\an6\\pos({x_pos},{y_pos})}}{formatted_term}"
+                        ass_content.append(dialogue_line)
+                        dialogue_count += 1
+                        print(f"  Segment {seg_idx+1}, Dialogue {dialogue_count}: pos=({x_pos},{y_pos}), term='{formatted_term[:50]}'", flush=True)
+            
+            # Write ASS file
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.ass', delete=False, encoding='utf-8') as terms_ass_file:
+                terms_ass_path = terms_ass_file.name
+                full_content = "\n".join(ass_content) + "\n"
+                terms_ass_file.write(full_content)
+                terms_ass_file.flush()
+                os.fsync(terms_ass_file.fileno())
+            
+            print(f"Created terms ASS file with {dialogue_count} dialogue entries for middle-right vertical display", flush=True)
+            print(f"ASS file created: {terms_ass_path}, size: {os.path.getsize(terms_ass_path)} bytes", flush=True)
+            
+            # Verify ASS file content
+            if os.path.getsize(terms_ass_path) > 0:
+                with open(terms_ass_path, 'r', encoding='utf-8') as verify_file:
+                    full_content_check = verify_file.read()
+                    sample_content = full_content_check[:500]
+                    print(f"ASS file sample (first 500 chars): {sample_content}", flush=True)
+                    dialogue_lines = [line for line in full_content_check.split('\n') if line.startswith('Dialogue:')]
+                    print(f"Found {len(dialogue_lines)} dialogue lines in ASS file", flush=True)
+                    if dialogue_lines:
+                        print(f"First dialogue line: {dialogue_lines[0][:150]}", flush=True)
+                        # Check if positioning tags are present
+                        if '\\pos(' in dialogue_lines[0] or '\\an6' in dialogue_lines[0]:
+                            print(f"✓ Positioning tags found in ASS file", flush=True)
+                        else:
+                            print(f"⚠ WARNING: No positioning tags found in first dialogue line!", flush=True)
+        except Exception as e:
+            print(f"ERROR creating ASS file for terms: {e}", flush=True)
+            import traceback
+            print(f"Traceback: {traceback.format_exc()}", flush=True)
+            terms_ass_path = None
     
     try:
         # Use ffmpeg to burn subtitles into video
         srt_path_escaped = srt_path.replace('\\', '\\\\').replace(':', '\\:')
         
-        # Adjust subtitle styling to accommodate 3 lines if needed
-        result = subprocess.run(
-            [
-                'ffmpeg',
-                '-i', video_path,
-                '-vf', f"subtitles='{srt_path_escaped}':force_style='FontSize=18,PrimaryColour=&Hffffff,OutlineColour=&H000000,BorderStyle=1,Alignment=2,MarginV=20'",
-                '-c:a', 'copy',
-                '-y',
-                output_path
-            ],
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
-        )
+        # Build filter: main subtitles (Japanese only) + terms overlay (middle-right)
+        if terms_ass_path:
+            # Escape paths for ffmpeg filter (handle backslashes, colons, and single quotes)
+            terms_path_escaped = terms_ass_path.replace('\\', '\\\\').replace(':', '\\:').replace("'", "'\\''")
+            # Use filter_complex to apply both subtitle filters
+            # Try using 'subtitles' filter for ASS file - it might work better when chained
+            # The 'subtitles' filter supports ASS files and might handle the chain better
+            filter_complex = (
+                f"[0:v]subtitles='{srt_path_escaped}':force_style='FontSize=18,PrimaryColour=&Hffffff,"
+                f"OutlineColour=&H000000,BorderStyle=1,Alignment=2,MarginV=20'[v1];"
+                f"[v1]subtitles='{terms_path_escaped}'[v]"
+            )
+            print(f"Applying subtitles: main SRT at {srt_path}, terms ASS at {terms_ass_path}", flush=True)
+            print(f"Filter complex: {filter_complex}", flush=True)
+            
+            result = subprocess.run(
+                [
+                    'ffmpeg',
+                    '-i', video_path,
+                    '-filter_complex', filter_complex,
+                    '-map', '[v]',
+                    '-map', '0:a',
+                    '-c:a', 'copy',
+                    '-y',
+                    output_path
+                ],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+            # Log FFmpeg stderr to check for any ASS file processing issues
+            if result.stderr:
+                stderr_output = result.stderr.decode('utf-8', errors='ignore')
+                # Check for ASS-related errors or warnings
+                if 'ass' in stderr_output.lower() or 'subtitle' in stderr_output.lower():
+                    print(f"FFmpeg stderr (relevant parts): {stderr_output[:1000]}", flush=True)
+        else:
+            # Only main subtitles (no terms)
+            result = subprocess.run(
+                [
+                    'ffmpeg',
+                    '-i', video_path,
+                    '-vf', f"subtitles='{srt_path_escaped}':force_style='FontSize=18,PrimaryColour=&Hffffff,OutlineColour=&H000000,BorderStyle=1,Alignment=2,MarginV=20'",
+                    '-c:a', 'copy',
+                    '-y',
+                    output_path
+                ],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
         
         os.unlink(srt_path)
+        if terms_ass_path and os.path.exists(terms_ass_path):
+            os.unlink(terms_ass_path)
         return output_path
     except subprocess.CalledProcessError as e:
         if os.path.exists(srt_path):
@@ -678,6 +857,21 @@ def process_trailer_video(video_path: str, output_path: str, language: str = Non
         
         if not source_segments:
             raise ValueError("No segments transcribed")
+        
+        # Step 2.1: Check for generic/demo content
+        full_transcription = ' '.join(seg.get('text', '') for seg in source_segments if seg.get('text', '').strip())
+        generic_check = detect_generic_demo_content(full_transcription, source_segments)
+        
+        if generic_check['is_generic']:
+            reasons_str = '; '.join(generic_check['reasons'])
+            error_msg = (
+                f"This trailer appears to contain generic/demo content rather than actual movie dialogue. "
+                f"Confidence: {generic_check['confidence']:.1%}. "
+                f"Reasons: {reasons_str}. "
+                f"Please try a different trailer or movie."
+            )
+            print(f"⚠️ GENERIC CONTENT DETECTED: {error_msg}", flush=True)
+            raise ValueError(error_msg)
         
         # Step 2.5: Per-segment cleanup and translation for perfect timing (OPTIMIZED: Parallel)
         from backend_python.translate import cleanup_english_transcription, translate_english_to_japanese
@@ -844,6 +1038,117 @@ def process_trailer_video(video_path: str, output_path: str, language: str = Non
         # Clean up temporary audio file
         if temp_audio and os.path.exists(temp_audio):
             os.unlink(temp_audio)
+
+def detect_generic_demo_content(transcription: str, segments: list = None) -> dict:
+    """
+    Detect if transcription contains generic/demo content rather than actual movie dialogue.
+    
+    Args:
+        transcription: Full transcription text
+        segments: List of segments (optional, for more detailed analysis)
+    
+    Returns:
+        dict with keys:
+            - is_generic: bool (True if detected as generic/demo content)
+            - confidence: float (0.0 to 1.0, higher = more confident it's generic)
+            - reasons: list of strings explaining why it was flagged
+    """
+    if not transcription or not transcription.strip():
+        return {
+            'is_generic': False,
+            'confidence': 0.0,
+            'reasons': []
+        }
+    
+    transcription_lower = transcription.lower()
+    reasons = []
+    confidence_score = 0.0
+    
+    # Pattern 1: Common generic/demo phrases
+    generic_phrases = [
+        'if you have any questions',
+        'please post them in the comments',
+        'transcribe all audio',
+        'including dialogue',
+        'narration',
+        'voiceovers',
+        'any spoken content',
+        'this is a movie trailer',
+        'transcribe accurately',
+        'please subscribe',
+        'like and share',
+        'click the bell icon',
+        'for more videos',
+        'check out our channel',
+        'available on',
+        'pc, ps4, xbox',
+        'coming soon',
+        'watch now',
+        'download now',
+        'visit our website',
+    ]
+    
+    found_phrases = []
+    for phrase in generic_phrases:
+        if phrase in transcription_lower:
+            found_phrases.append(phrase)
+            confidence_score += 0.15
+    
+    if found_phrases:
+        reasons.append(f"Found generic phrases: {', '.join(found_phrases[:3])}")
+    
+    # Pattern 2: High repetition (same sentence repeated multiple times)
+    if segments:
+        segment_texts = [seg.get('text', '').strip().lower() for seg in segments if seg.get('text', '').strip()]
+        if len(segment_texts) > 1:
+            # Count how many segments are very similar
+            text_counts = Counter(segment_texts)
+            most_common = text_counts.most_common(1)[0]
+            if most_common[1] > len(segment_texts) * 0.6:  # Same text in >60% of segments
+                confidence_score += 0.4
+                reasons.append(f"High repetition: same text appears in {most_common[1]}/{len(segment_texts)} segments")
+    
+    # Pattern 3: Very short or very repetitive transcription
+    words = transcription.split()
+    if len(words) < 20:  # Very short transcription
+        confidence_score += 0.2
+        reasons.append("Transcription is very short (<20 words)")
+    
+    # Check for repetitive words
+    if len(words) > 0:
+        word_counts = Counter(word.lower() for word in words)
+        most_common_word = word_counts.most_common(1)[0]
+        if most_common_word[1] > len(words) * 0.3:  # Same word appears in >30% of words
+            confidence_score += 0.25
+            reasons.append(f"High word repetition: '{most_common_word[0]}' appears {most_common_word[1]} times")
+    
+    # Pattern 4: Technical/instructional language
+    technical_keywords = ['transcribe', 'audio', 'dialogue', 'narration', 'voiceover', 'content', 'include']
+    technical_count = sum(1 for keyword in technical_keywords if keyword in transcription_lower)
+    if technical_count >= 3:
+        confidence_score += 0.2
+        reasons.append(f"Contains {technical_count} technical/instructional keywords")
+    
+    # Pattern 5: No variety in sentence structure (all segments very similar length)
+    if segments and len(segments) > 2:
+        segment_lengths = [len(seg.get('text', '').split()) for seg in segments if seg.get('text', '').strip()]
+        if segment_lengths:
+            avg_length = sum(segment_lengths) / len(segment_lengths)
+            # If all segments are very similar length (low variance), might be repetitive
+            variance = sum((l - avg_length) ** 2 for l in segment_lengths) / len(segment_lengths)
+            if variance < 2.0 and len(segment_lengths) > 3:  # Very low variance
+                confidence_score += 0.15
+                reasons.append("Low sentence structure variety (all segments similar length)")
+    
+    # Normalize confidence to 0.0-1.0
+    confidence = min(1.0, confidence_score)
+    is_generic = confidence >= 0.4  # Threshold: 40% confidence = generic
+    
+    return {
+        'is_generic': is_generic,
+        'confidence': confidence,
+        'reasons': reasons
+    }
 
 def sanitize_subtitle_text(text: str) -> str:
     """

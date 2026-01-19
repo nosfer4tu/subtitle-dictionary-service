@@ -274,7 +274,10 @@ def get_movie_details(movie_id):
         return None
 
 def get_movie_trailer(movie_id):
-    """Fetch trailer URL for a movie from TMDB"""
+    """
+    Fetch trailer URL for a movie from TMDB.
+    Prioritizes official trailers and tries multiple options to avoid generic/demo content.
+    """
     if not TMDB_API_KEY:
         print("Error: TMDB_API_KEY not set", flush=True)
         return None
@@ -289,15 +292,59 @@ def get_movie_trailer(movie_id):
         res.raise_for_status()
         data = res.json()
         
-        # Look for YouTube trailer
-        for video in data.get("results", []):
-            if video.get("type") == "Trailer" and video.get("site") == "YouTube":
-                return f"https://www.youtube.com/watch?v={video.get('key')}"
+        videos = data.get("results", [])
+        if not videos:
+            return None
         
-        # If no trailer, return first YouTube video
-        for video in data.get("results", []):
-            if video.get("site") == "YouTube":
-                return f"https://www.youtube.com/watch?v={video.get('key')}"
+        # Strategy 1: Prefer official trailers (type="Trailer" and official=True)
+        official_trailers = [
+            v for v in videos 
+            if v.get("type") == "Trailer" 
+            and v.get("site") == "YouTube"
+            and v.get("official", False)
+        ]
+        if official_trailers:
+            # Sort by published_at (newer first) and pick the first one
+            official_trailers.sort(key=lambda x: x.get("published_at", ""), reverse=True)
+            trailer = official_trailers[0]
+            print(f"Selected official trailer: {trailer.get('name', 'Unknown')} (published: {trailer.get('published_at', 'Unknown')})", flush=True)
+            return f"https://www.youtube.com/watch?v={trailer.get('key')}"
+        
+        # Strategy 2: Any trailer (type="Trailer")
+        trailers = [
+            v for v in videos 
+            if v.get("type") == "Trailer" 
+            and v.get("site") == "YouTube"
+        ]
+        if trailers:
+            # Sort by published_at (newer first) and pick the first one
+            trailers.sort(key=lambda x: x.get("published_at", ""), reverse=True)
+            trailer = trailers[0]
+            print(f"Selected trailer: {trailer.get('name', 'Unknown')} (published: {trailer.get('published_at', 'Unknown')})", flush=True)
+            return f"https://www.youtube.com/watch?v={trailer.get('key')}"
+        
+        # Strategy 3: Teaser trailers (type="Teaser")
+        teasers = [
+            v for v in videos 
+            if v.get("type") == "Teaser" 
+            and v.get("site") == "YouTube"
+        ]
+        if teasers:
+            teasers.sort(key=lambda x: x.get("published_at", ""), reverse=True)
+            teaser = teasers[0]
+            print(f"Selected teaser: {teaser.get('name', 'Unknown')} (published: {teaser.get('published_at', 'Unknown')})", flush=True)
+            return f"https://www.youtube.com/watch?v={teaser.get('key')}"
+        
+        # Strategy 4: Any YouTube video (last resort)
+        youtube_videos = [
+            v for v in videos 
+            if v.get("site") == "YouTube"
+        ]
+        if youtube_videos:
+            youtube_videos.sort(key=lambda x: x.get("published_at", ""), reverse=True)
+            video = youtube_videos[0]
+            print(f"Selected YouTube video (fallback): {video.get('name', 'Unknown')} (type: {video.get('type', 'Unknown')})", flush=True)
+            return f"https://www.youtube.com/watch?v={video.get('key')}"
         
         return None
     except Exception as e:

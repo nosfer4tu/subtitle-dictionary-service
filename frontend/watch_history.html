@@ -1,0 +1,342 @@
+<!doctype html>
+<html lang="ja">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>視聴履歴</title>
+        <style>
+            * {
+                margin: 0;
+                padding: 0;
+                box-sizing: border-box;
+            }
+            body {
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+                background: #f5f5f5;
+                padding: 20px;
+            }
+            .container {
+                max-width: 1200px;
+                margin: 0 auto;
+                background: white;
+                border-radius: 8px;
+                padding: 30px;
+                box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+            }
+            .header {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                margin-bottom: 30px;
+            }
+            h1 {
+                color: #333;
+                margin: 0;
+            }
+            .back-link {
+                margin-bottom: 20px;
+            }
+            .back-link a {
+                color: #667eea;
+                text-decoration: none;
+            }
+            .back-link a:hover {
+                text-decoration: underline;
+            }
+            .actions {
+                display: flex;
+                gap: 10px;
+            }
+            .btn {
+                padding: 8px 16px;
+                border: none;
+                border-radius: 6px;
+                cursor: pointer;
+                font-size: 14px;
+                transition: all 0.2s;
+            }
+            .btn-danger {
+                background: #dc3545;
+                color: white;
+            }
+            .btn-danger:hover {
+                background: #c82333;
+            }
+            .btn-secondary {
+                background: #6c757d;
+                color: white;
+            }
+            .btn-secondary:hover {
+                background: #5a6268;
+            }
+            .history-list {
+                display: grid;
+                gap: 20px;
+            }
+            .history-item {
+                display: flex;
+                gap: 20px;
+                border: 1px solid #e0e0e0;
+                border-radius: 8px;
+                padding: 20px;
+                background: #fafafa;
+                transition: all 0.2s;
+                position: relative;
+            }
+            .history-item:hover {
+                background: #f0f0f0;
+                border-color: #667eea;
+                box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+            }
+            .movie-poster {
+                width: 120px;
+                height: 180px;
+                object-fit: cover;
+                border-radius: 6px;
+                flex-shrink: 0;
+            }
+            .movie-poster-placeholder {
+                width: 120px;
+                height: 180px;
+                background: #e0e0e0;
+                border-radius: 6px;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                color: #999;
+                font-size: 12px;
+                flex-shrink: 0;
+            }
+            .movie-info {
+                flex: 1;
+            }
+            .movie-title {
+                font-size: 20px;
+                font-weight: 600;
+                color: #333;
+                margin-bottom: 10px;
+                cursor: pointer;
+            }
+            .movie-title:hover {
+                color: #667eea;
+            }
+            .movie-meta {
+                color: #666;
+                font-size: 14px;
+                margin-bottom: 8px;
+            }
+            .watched-date {
+                color: #999;
+                font-size: 13px;
+                margin-top: 10px;
+            }
+            .delete-btn {
+                position: absolute;
+                top: 10px;
+                right: 10px;
+                background: transparent;
+                border: none;
+                color: #999;
+                cursor: pointer;
+                font-size: 18px;
+                padding: 5px;
+                border-radius: 4px;
+                transition: all 0.2s;
+            }
+            .delete-btn:hover {
+                background: #f0f0f0;
+                color: #dc3545;
+            }
+            .no-history {
+                text-align: center;
+                color: #666;
+                padding: 60px 20px;
+            }
+            .no-history-icon {
+                font-size: 48px;
+                margin-bottom: 20px;
+                opacity: 0.5;
+            }
+            .clear-confirm {
+                display: none;
+                position: fixed;
+                top: 0;
+                left: 0;
+                right: 0;
+                bottom: 0;
+                background: rgba(0, 0, 0, 0.5);
+                z-index: 1000;
+                align-items: center;
+                justify-content: center;
+            }
+            .clear-confirm.show {
+                display: flex;
+            }
+            .confirm-dialog {
+                background: white;
+                padding: 30px;
+                border-radius: 8px;
+                max-width: 400px;
+                text-align: center;
+            }
+            .confirm-dialog h3 {
+                margin-bottom: 15px;
+                color: #333;
+            }
+            .confirm-dialog p {
+                margin-bottom: 20px;
+                color: #666;
+            }
+            .confirm-actions {
+                display: flex;
+                gap: 10px;
+                justify-content: center;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="back-link">
+                <a href="{{ url_for('app_index') }}">← 映画検索に戻る</a> | 
+                <a href="{{ url_for('watch_later_page') }}">後で見る</a>
+            </div>
+            
+            <div class="header">
+                <h1>視聴履歴</h1>
+                {% if history %}
+                <div class="actions">
+                    <button class="btn btn-danger" onclick="showClearConfirm()">履歴をクリア</button>
+                </div>
+                {% endif %}
+            </div>
+
+            {% if history %}
+            <div class="history-list">
+                {% for entry in history %}
+                <div class="history-item">
+                    {% if entry.poster_path %}
+                    <img
+                        src="{{ entry.poster_path }}"
+                        alt="{{ entry.movie_title or 'Movie' }}"
+                        class="movie-poster"
+                        onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';"
+                    />
+                    <div class="movie-poster-placeholder" style="display: none;">画像なし</div>
+                    {% else %}
+                    <div class="movie-poster-placeholder">画像なし</div>
+                    {% endif %}
+                    
+                    <div class="movie-info">
+                        <h3 class="movie-title" onclick="window.location.href='{{ url_for('movie_detail', movie_id=entry.movie_id) }}'">
+                            {{ entry.movie_title or 'Unknown Movie' }}
+                        </h3>
+                        <div class="movie-meta">
+                            <p>Movie ID: {{ entry.movie_id }}</p>
+                            <p>YouTube Video ID: {{ entry.youtube_video_id }}</p>
+                            {% if entry.release_date %}
+                            <p>公開日: {{ entry.release_date }}</p>
+                            {% endif %}
+                            {% if entry.vote_average %}
+                            <p>評価: ⭐ {{ "%.1f"|format(entry.vote_average) }}/10</p>
+                            {% endif %}
+                        </div>
+                        <div class="watched-date">
+                            視聴日時: {{ entry.watched_at.strftime('%Y年%m月%d日 %H:%M') if entry.watched_at else '不明' }}
+                        </div>
+                    </div>
+                    
+                    <button class="delete-btn" onclick="deleteEntry({{ entry.id }}, event)" title="削除">
+                        ×
+                    </button>
+                </div>
+                {% endfor %}
+            </div>
+            {% else %}
+            <div class="no-history">
+                <div class="no-history-icon">📺</div>
+                <h2>視聴履歴がありません</h2>
+                <p>映画のトレーラーを処理すると、ここに履歴が表示されます。</p>
+            </div>
+            {% endif %}
+        </div>
+
+        <!-- Clear confirmation dialog -->
+        <div class="clear-confirm" id="clearConfirm">
+            <div class="confirm-dialog">
+                <h3>履歴をクリアしますか？</h3>
+                <p>この操作は取り消せません。すべての視聴履歴が削除されます。</p>
+                <div class="confirm-actions">
+                    <button class="btn btn-danger" onclick="clearHistory()">クリア</button>
+                    <button class="btn btn-secondary" onclick="hideClearConfirm()">キャンセル</button>
+                </div>
+            </div>
+        </div>
+
+        <script>
+            function deleteEntry(entryId, event) {
+                event.stopPropagation();
+                if (!confirm('この履歴を削除しますか？')) {
+                    return;
+                }
+
+                fetch(`/api/watch-history/${entryId}`, {
+                    method: 'DELETE',
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        // Remove the entry from the DOM
+                        event.target.closest('.history-item').remove();
+                        
+                        // Check if history is now empty
+                        const historyList = document.querySelector('.history-list');
+                        if (historyList && historyList.children.length === 0) {
+                            location.reload();
+                        }
+                    } else {
+                        alert('削除に失敗しました: ' + (data.error || 'Unknown error'));
+                    }
+                })
+                .catch(error => {
+                    console.error('Error:', error);
+                    alert('削除中にエラーが発生しました');
+                });
+            }
+
+            function showClearConfirm() {
+                document.getElementById('clearConfirm').classList.add('show');
+            }
+
+            function hideClearConfirm() {
+                document.getElementById('clearConfirm').classList.remove('show');
+            }
+
+            function clearHistory() {
+                fetch('/api/watch-history/clear', {
+                    method: 'POST',
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        location.reload();
+                    } else {
+                        alert('クリアに失敗しました: ' + (data.error || 'Unknown error'));
+                        hideClearConfirm();
+                    }
+                })
+                .catch(error => {
+                    console.error('Error:', error);
+                    alert('クリア中にエラーが発生しました');
+                    hideClearConfirm();
+                });
+            }
+
+            // Close dialog when clicking outside
+            document.getElementById('clearConfirm').addEventListener('click', function(e) {
+                if (e.target === this) {
+                    hideClearConfirm();
+                }
+            });
+        </script>
+    </body>
+</html>

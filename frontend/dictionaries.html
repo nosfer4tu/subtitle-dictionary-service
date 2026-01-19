@@ -73,7 +73,9 @@
     <body>
         <div class="container">
             <div class="back-link">
-                <a href="{{ url_for('app_index') }}">← 映画検索に戻る</a>
+                <a href="{{ url_for('app_index') }}">← 映画検索に戻る</a> | 
+                <a href="{{ url_for('watch_history_page') }}">視聴履歴</a> | 
+                <a href="{{ url_for('watch_later_page') }}">後で見る</a>
             </div>
             <h1>辞書一覧</h1>
             {% if dictionaries %}

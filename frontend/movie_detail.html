@@ -125,6 +125,26 @@
                     transform: rotate(360deg);
                 }
             }
+            .watch-later-button {
+                padding: 10px 20px;
+                background: #28a745;
+                color: white;
+                border: none;
+                border-radius: 6px;
+                cursor: pointer;
+                font-size: 14px;
+                font-weight: 500;
+                transition: all 0.2s;
+            }
+            .watch-later-button:hover {
+                background: #218838;
+            }
+            .watch-later-button.added {
+                background: #6c757d;
+            }
+            .watch-later-button.added:hover {
+                background: #5a6268;
+            }
         </style>
     </head>
     <body>
@@ -166,7 +186,16 @@
             </div>
 
             <div class="upload-section">
-                <h2>トレーラーアップロード</h2>
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+                    <h2 style="margin: 0;">トレーラーアップロード</h2>
+                    <button id="watch-later-btn" class="watch-later-button" onclick="toggleWatchLater()">
+                        {% if in_watch_later %}
+                        ✓ 後で見るに追加済み
+                        {% else %}
+                        + 後で見るに追加
+                        {% endif %}
+                    </button>
+                </div>
                 <div id="upload-status" class="upload-status loading">
                     <span class="spinner"></span>
                     <span id="status-text">トレーラーを処理しています...</span>
@@ -304,8 +333,64 @@
                 }
             }
 
-            // Automatically start upload when page loads
-            document.addEventListener('DOMContentLoaded', uploadTrailer);
+            // Watch later functionality
+            let isInWatchLater = {{ 'true' if in_watch_later else 'false' }};
+
+            async function toggleWatchLater() {
+                const btn = document.getElementById('watch-later-btn');
+                const wasInList = isInWatchLater;
+
+                try {
+                    if (isInWatchLater) {
+                        // Remove from watch later
+                        const response = await fetch(`/api/watch-later/${movieId}`, {
+                            method: 'DELETE',
+                        });
+                        const data = await response.json();
+                        
+                        if (data.success) {
+                            isInWatchLater = false;
+                            btn.textContent = '+ 後で見るに追加';
+                            btn.classList.remove('added');
+                        } else {
+                            alert('削除に失敗しました: ' + (data.error || 'Unknown error'));
+                        }
+                    } else {
+                        // Add to watch later
+                        const response = await fetch('/api/watch-later', {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                            },
+                            body: JSON.stringify({
+                                movie_id: movieId,
+                                movie_title: movieTitle,
+                            }),
+                        });
+                        const data = await response.json();
+                        
+                        if (data.success) {
+                            isInWatchLater = true;
+                            btn.textContent = '✓ 後で見るに追加済み';
+                            btn.classList.add('added');
+                        } else {
+                            alert('追加に失敗しました: ' + (data.error || 'Unknown error'));
+                        }
+                    }
+                } catch (error) {
+                    console.error('Error:', error);
+                    alert('操作中にエラーが発生しました');
+                }
+            }
+
+            // Initialize button state
+            document.addEventListener('DOMContentLoaded', function() {
+                const btn = document.getElementById('watch-later-btn');
+                if (isInWatchLater) {
+                    btn.classList.add('added');
+                }
+                uploadTrailer();
+            });
         </script>
     </body>
 </html>

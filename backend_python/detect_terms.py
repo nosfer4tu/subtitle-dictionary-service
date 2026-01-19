@@ -193,17 +193,69 @@ def detect_terms(text: str, source_language: str = 'hi') -> dict:
                             'why_important': why_important if why_important else "インド文化において重要な用語"
                         })
             
-            # Filter out generic terms (optional - can be removed if too strict)
-            # This helps avoid terms like "神々" which are too generic
+            # Filter out generic terms, hallucinated terms, and plain English common nouns
+            # This helps avoid terms like "神々" (too generic), generic food words like "Papaya",
+            # and cultural terms that do NOT actually appear in the source text (hallucinations).
             filtered_terms = []
             generic_indicators = ['神々', '神', '神様', '一般的', 'generic']
+            # Markers that indicate a true cultural/proper-noun concept
+            cultural_markers = [
+                '人名', '人物', '固有名詞',
+                '神話', '女神', '神', '神格', '宗教',
+                '祭り', '祝祭',
+                '都市', '街', '村', '州', '地方', '地域', '聖地', '寺院',
+                '王国', '王朝', '王',
+                '伝説', '英雄', '叙事詩'
+            ]
+            source_text_lower = text.lower()
+            
             for term in valid_terms:
-                meaning = term.get('meaning_japanese', '').lower()
-                # Skip if meaning is too generic
-                if not any(indicator in meaning for indicator in generic_indicators):
-                    filtered_terms.append(term)
-                elif len(valid_terms) <= 3:  # Keep if we have very few terms
-                    filtered_terms.append(term)
+                meaning = term.get('meaning_japanese', '')
+                why_important = term.get('why_important', '')
+                combined_explanation = f"{meaning} {why_important}"
+                
+                # 1. Filter out overly generic meanings
+                meaning_lower = meaning.lower()
+                if any(indicator in meaning_lower for indicator in generic_indicators):
+                    # Keep if we have very few terms (for robustness), otherwise skip
+                    if len(valid_terms) > 3:
+                        continue
+                
+                word = term.get('word', '')
+                
+                # 2. Drop hallucinated terms whose surface word never appears in the source text
+                #    (case-insensitive, simple substring check).
+                if word:
+                    word_lower = word.lower()
+                    if word_lower not in source_text_lower:
+                        # If the word itself never appears in the transcript, treat as hallucination.
+                        # This will drop things like "Ishvara", "Dharma", "Brahmarakshasa" if they
+                        # are invented by the model instead of being in the actual text.
+                        continue
+                
+                # 3. Reject plain English common nouns unless clearly cultural/proper nouns
+                is_ascii = all(ord(c) < 128 for c in word) if word else False
+                if is_ascii:
+                    # Explicitly block known generic English terms regardless of explanation
+                    blocked_english_terms = {
+                        'papaya',
+                        'sesame seed',
+                        'sesame seeds',
+                        'non-vegetarian food',
+                        'non vegetarian food',
+                        'non-veg food',
+                        'non veg food',
+                    }
+                    if word.lower() in blocked_english_terms:
+                        continue
+                    
+                    # Allow only if explanation clearly marks it as proper noun / unique concept
+                    if not any(marker in combined_explanation for marker in cultural_markers):
+                        # This will drop things like "Papaya", "Sesame seed", "Non-vegetarian food"
+                        # whose explanations are generic (common food, common category, etc.)
+                        continue
+                
+                filtered_terms.append(term)
             
             if len(filtered_terms) > 0:
                 result['terms'] = filtered_terms
