@@ -47,7 +47,7 @@ app.register_blueprint(auth_blueprint)
 # Pipeline version for cache invalidation
 # Increment this when the translation pipeline logic changes
 # Version 3: Removed source text from subtitles, display detected terms on middle-right in vertical line
-PIPELINE_VERSION = 15
+PIPELINE_VERSION = 16
 
 # Initialize database tables on startup
 try:

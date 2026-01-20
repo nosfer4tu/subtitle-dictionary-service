@@ -650,11 +650,12 @@ def process_video_with_subtitles(
             ass_content.append("")
             ass_content.append("[V4+ Styles]")
             ass_content.append("Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding")
-            # Style: TermsRight - positioned on middle-right, cyan color
+            # Style: TermsRight - positioned on middle-right, cyan color, with semi-opaque box background
             # Alignment=6 = middle-right (for vertical centering)
             # We'll override with \an6\pos() in dialogue lines for exact positioning
             # Make font larger and more visible - increased to 34
-            ass_content.append("Style: TermsRight,Arial,34,&H00FFFF,&H00FFFF,&H000000,&H80000000,0,0,0,0,100,100,0,0,1,3,0,6,0,0,0,1")
+            # BorderStyle=3 enables an opaque box background; BackColour alpha A0 makes it stand out more
+            ass_content.append("Style: TermsRight,Arial,34,&H00FFFF,&H00FFFF,&H000000,&HA0000000,0,0,0,0,100,100,0,0,3,3,0,6,0,0,0,1")
             ass_content.append("")
             ass_content.append("[Events]")
             ass_content.append("Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text")
